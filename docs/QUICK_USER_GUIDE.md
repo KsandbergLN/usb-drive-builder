@@ -92,3 +92,5 @@ For a successful drive, safely eject it in Windows before removing it. If a driv
 Build and crash logs are stored at:
 
 `%LOCALAPPDATA%\LaptopQAUsbBuilder\Logs`
+
+Logs may include source filenames and line numbers for troubleshooting, but they do not include the developer's local build or OneDrive path.

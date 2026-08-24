@@ -103,5 +103,5 @@ The publish script uses a staging directory and places the versioned executable 
 - Protected metadata such as `System Volume Information` and `$RECYCLE.BIN` is skipped when a drive root is used as a source.
 - FAT32 sizes and volume-label lengths are validated against Windows limits.
 - Copy, build, and crash logs are saved under `%LOCALAPPDATA%\LaptopQAUsbBuilder\Logs`.
-- PowerShell CLIXML errors are decoded before logging so Windows storage failures retain their useful error message.
+- PowerShell CLIXML errors are decoded before logging so Windows storage failures retain their useful error message. Exception stack traces retain source filenames and line numbers while removing the developer's local build path.
 - Bootable ISO preparation targets supported removable USB flash sticks with native NTFS UEFI support. It does not create FAT32 or legacy-BIOS boot media, and fixed-media external hard disks are not supported as boot targets. Secure Boot acceptance still depends on the ISO signatures and target firmware policy.

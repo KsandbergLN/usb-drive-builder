@@ -51,7 +51,7 @@ public partial class MainWindow : Window
     private double _activityProgressStart;
     private double _activityProgressEnd;
     private string _activityName = "Transfer";
-    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.4.51"}";
+    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.4.52"}";
     private const string MainPartitionDragFormat = "LaptopQaUsbBuilder.MainPartition";
 
     public MainWindow()
@@ -296,7 +296,7 @@ public partial class MainWindow : Window
                 CompleteQueueDiskEstimate();
                 failures.Add($"Disk {disk.Number}: {ex.Message}");
                 AddActivity($"Disk {disk.Number} FAILED: {ex.Message}. Continuing queue.");
-                Log($"Disk {disk.Number} ERROR: {ex}");
+                Log($"Disk {disk.Number} ERROR: {LogSanitizer.SanitizeException(ex)}");
             }
         }
         BuildProgress.IsIndeterminate = false;
@@ -481,7 +481,7 @@ public partial class MainWindow : Window
             catch (Exception ex)
             {
                 AddActivity($"Warning: Windows could not dismount {Path.GetFileName(isoPath)} automatically.");
-                Log($"ISO dismount warning for {isoPath}: {ex}");
+                Log($"ISO dismount warning for {isoPath}: {LogSanitizer.SanitizeException(ex)}");
             }
         }
     }

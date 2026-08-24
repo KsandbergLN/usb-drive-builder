@@ -9,7 +9,7 @@ This is an operations handoff for technicians. It does not describe how the appl
 ## Current release
 
 - Application: Laptop QA USB Drive Builder
-- Release: 1.4.51
+- Release: 1.4.52
 - Platform: Windows 10/11, 64-bit
 - Launch: Run the newest `Laptop QA USB Drive Builder vX.Y.Z.exe` from the `dist` folder
 - Permissions: Windows administrator approval is required
@@ -104,7 +104,7 @@ Logs are saved under:
 
 `%LOCALAPPDATA%\LaptopQAUsbBuilder\Logs`
 
-The completion dialog shows the current build-log path. Crash logs are saved in the same folder.
+The completion dialog shows the current build-log path. Crash logs are saved in the same folder. Stack traces retain useful source filenames and line numbers but sanitize the developer's local build and OneDrive path.
 
 ## Escalation handoff
 
