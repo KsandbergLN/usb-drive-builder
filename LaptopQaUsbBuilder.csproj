@@ -7,12 +7,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\app-icon.ico</ApplicationIcon>
-    <AppVersion>2.0.24</AppVersion>
+    <AppVersion>2.0.25</AppVersion>
     <AssemblyName>Laptop QA USB Drive Builder v$(AppVersion)</AssemblyName>
     <RootNamespace>LaptopQaUsbBuilder</RootNamespace>
     <Version>$(AppVersion)</Version>
-    <AssemblyVersion>2.0.24.0</AssemblyVersion>
-    <FileVersion>2.0.24.0</FileVersion>
+    <AssemblyVersion>2.0.25.0</AssemblyVersion>
+    <FileVersion>2.0.25.0</FileVersion>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>false</SelfContained>
     <DebugType>embedded</DebugType>

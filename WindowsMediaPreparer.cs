@@ -195,7 +195,13 @@ public sealed class WindowsMediaPreparer
         var error = await errorTask;
         if (process.ExitCode == 0) return DismRunOutcome.Success;
         var logDelta = ReadLogFromOffset(dismLog, logStart);
-        var rejectedDrivers = ExtractRejectedDriverPaths(logDelta);
+        var rejectedDriverDetails = ExtractRejectedDrivers(logDelta);
+        var rejectedDrivers = rejectedDriverDetails.Select(detail => detail.DriverPath).ToList();
+        foreach (var detail in rejectedDriverDetails)
+        {
+            var codes = detail.ErrorCodes.Count > 0 ? string.Join(", ", detail.ErrorCodes) : $"DISM exit code {process.ExitCode}";
+            _log($"Driver package failed to install [{codes}]: {detail.DriverPath}");
+        }
         var installedAny = output.Contains("successfully installed", StringComparison.OrdinalIgnoreCase) ||
                            output.Contains("already installed", StringComparison.OrdinalIgnoreCase);
         var skippableDriverPackageError = process.ExitCode == 13;
@@ -203,16 +209,19 @@ public sealed class WindowsMediaPreparer
         {
             const string reason = "invalid package data (0x8007000D)";
             _activity($"Skipped {rejectedDrivers.Count} driver package(s) with {reason} and continued servicing.");
-            _log($"DISM driver injection returned exit code {process.ExitCode} for package-scoped {reason}. Continuing without a blocking prompt. AcceptedAnyReported={installedAny}; AllowAllRejected={allowAllRejectedDrivers}. Rejected package(s): {string.Join("; ", rejectedDrivers.Take(20))}");
+            _log($"DISM driver injection returned exit code {process.ExitCode} for package-scoped {reason}. Continuing without a blocking prompt. AcceptedAnyReported={installedAny}; AllowAllRejected={allowAllRejectedDrivers}. Complete rejected package count: {rejectedDrivers.Count}.");
             return new DismRunOutcome(rejectedDrivers);
         }
         var lines = error.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
             .Concat(output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
             .Select(line => line.Trim()).Where(line => line.Length > 0).ToArray();
+        var completeListNote = rejectedDrivers.Count > 1
+            ? $" {rejectedDrivers.Count} driver packages failed; the complete list was written to the build log."
+            : "";
         var useful = rejectedDrivers.Count > 0 && process.ExitCode is 2 or 3
-            ? $"DISM could not import driver package '{rejectedDrivers[0]}' because a required package file or path is missing (0x8007000{process.ExitCode}). Re-extract the complete driver package and try again."
+            ? $"DISM could not import driver package '{rejectedDrivers[0]}' because a required package file or path is missing (0x8007000{process.ExitCode}).{completeListNote} Re-extract the complete driver package and try again."
             : rejectedDrivers.Count > 0
-            ? $"DISM rejected driver package '{rejectedDrivers[0]}'. The package contains invalid or incompatible driver data."
+            ? $"DISM rejected driver package '{rejectedDrivers[0]}'. The package contains invalid or incompatible driver data.{completeListNote}"
             : lines.LastOrDefault(line => line.Contains("Error:", StringComparison.OrdinalIgnoreCase))
                      ?? lines.LastOrDefault(line => !line.Contains("DISM log file", StringComparison.OrdinalIgnoreCase))
                      ?? $"DISM failed with exit code {process.ExitCode}.";
@@ -245,9 +254,9 @@ public sealed class WindowsMediaPreparer
         catch (UnauthorizedAccessException) { return ""; }
     }
 
-    private static List<string> ExtractRejectedDriverPaths(string logText)
+    private static List<RejectedDriverDetail> ExtractRejectedDrivers(string logText)
     {
-        var paths = new List<string>();
+        var details = new List<RejectedDriverDetail>();
         foreach (var line in logText.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
         {
             if (!line.Contains("Failed to import driver package", StringComparison.OrdinalIgnoreCase) &&
@@ -256,9 +265,29 @@ public sealed class WindowsMediaPreparer
             var secondQuote = firstQuote < 0 ? -1 : line.IndexOf('\'', firstQuote + 1);
             if (firstQuote < 0 || secondQuote <= firstQuote + 1) continue;
             var path = line[(firstQuote + 1)..secondQuote];
-            if (!paths.Contains(path, StringComparer.OrdinalIgnoreCase)) paths.Add(path);
+            var errorCode = ExtractDismErrorCode(line);
+            var existing = details.FirstOrDefault(detail => detail.DriverPath.Equals(path, StringComparison.OrdinalIgnoreCase));
+            if (existing is null)
+            {
+                details.Add(new RejectedDriverDetail(path, errorCode is null ? [] : [errorCode]));
+            }
+            else if (errorCode is not null && !existing.ErrorCodes.Contains(errorCode, StringComparer.OrdinalIgnoreCase))
+            {
+                var index = details.IndexOf(existing);
+                details[index] = existing with { ErrorCodes = existing.ErrorCodes.Concat([errorCode]).ToArray() };
+            }
         }
-        return paths;
+        return details;
+    }
+
+    private static string? ExtractDismErrorCode(string line)
+    {
+        var marker = line.LastIndexOf("hr:0x", StringComparison.OrdinalIgnoreCase);
+        if (marker < 0) return null;
+        var start = marker + 3;
+        var end = start;
+        while (end < line.Length && (char.IsAsciiHexDigit(line[end]) || line[end] is 'x' or 'X')) end++;
+        return end > start ? line[start..end] : null;
     }
 
     private void ValidateDriverPackages(WindowsIsoSelection selection)
@@ -536,6 +565,7 @@ public sealed record PreparedWindowsMedia(string MediaPath, long TotalBytes, boo
     IReadOnlyList<DriverInjectionRejection> DriverRejections);
 public sealed record DriverInjectionRejection(string Image, string DriverPath);
 public sealed record IncompleteDriverPackage(string InfPath, IReadOnlyList<string> MissingFiles);
+public sealed record RejectedDriverDetail(string DriverPath, IReadOnlyList<string> ErrorCodes);
 public sealed class IncompleteDriverPackageException(string message) : InvalidOperationException(message);
 public sealed record DismRunOutcome(IReadOnlyList<string> RejectedDrivers, bool RequiresIndividualRetry = false)
 {
