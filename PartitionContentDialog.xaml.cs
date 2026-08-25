@@ -54,12 +54,11 @@ public partial class PartitionContentDialog : Window
     private void RefreshState()
     {
         var isNtfs = _partition.FileSystem.Equals("NTFS", StringComparison.OrdinalIgnoreCase);
-        var showIsoExtras = isNtfs && _partition.HasIso;
         XmlButton.Visibility = isNtfs ? Visibility.Visible : Visibility.Collapsed;
         IsoButton.Visibility = isNtfs ? Visibility.Visible : Visibility.Collapsed;
-        IsoExtrasSection.Visibility = showIsoExtras ? Visibility.Visible : Visibility.Collapsed;
+        IsoExtrasSection.Visibility = isNtfs ? Visibility.Visible : Visibility.Collapsed;
         StandardButtons.Columns = isNtfs ? 4 : 2;
-        Width = showIsoExtras ? 620 : isNtfs ? 520 : 390;
+        Width = isNtfs ? 620 : 390;
         SetSelected(XmlButton, _partition.HasAutounattend);
         SetSelected(IsoButton, _partition.HasIso);
         SetSelected(DriversButton, _partition.HasDrivers);

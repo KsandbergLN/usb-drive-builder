@@ -52,7 +52,7 @@ public partial class MainWindow : Window
     private double _activityProgressStart;
     private double _activityProgressEnd;
     private string _activityName = "Transfer";
-    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.22"}";
+    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.23"}";
     private const string MainPartitionDragFormat = "LaptopQaUsbBuilder.MainPartition";
     private const string ScriptRunnerName = "LaptopQA-RunScripts.cmd";
     private const string ScriptCleanupName = "LaptopQA-Cleanup.ps1";
@@ -220,12 +220,6 @@ public partial class MainWindow : Window
                     ? $"Prepared a generated Autounattend.xml to run scripts for {partition.Name}."
                     : $"Prepared the selected Autounattend.xml with the script runner for {partition.Name}.");
             }
-            catch (IncompleteDriverPackageException ex)
-            {
-                SetStatus(Localization.Text(_preferences.Language, "Ready"), "#147A4B");
-                MessageBox.Show(ex.Message, "Incomplete driver package", MessageBoxButton.OK, MessageBoxImage.Error);
-                return;
-            }
             catch (Exception ex)
             {
                 MessageBox.Show($"The Windows Setup script command could not be added to Autounattend.xml.\n\n{ex.Message}",
@@ -280,6 +274,12 @@ public partial class MainWindow : Window
                 var requiredCapacity = EstimateRequiredPartitionCapacity(partition);
                 if (requiredCapacity > partitionBytes)
                     throw new InvalidOperationException($"The prepared Windows media and other selected content need approximately {FormatBytes(requiredCapacity)}, but {partition.Name} is only {FormatBytes(partitionBytes)}.");
+            }
+            catch (IncompleteDriverPackageException ex)
+            {
+                SetStatus(Localization.Text(_preferences.Language, "Ready"), "#147A4B");
+                MessageBox.Show(ex.Message, "Incomplete driver package", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
             }
             catch (Exception ex)
             {
@@ -1408,6 +1408,7 @@ public partial class MainWindow : Window
             var maxLength = item.FileSystem == "FAT32" ? 11 : item.FileSystem == "exFAT" ? 15 : 32;
             if (item.Name.Length > maxLength) { message = $"{item.FileSystem} label '{item.Name}' exceeds {maxLength} characters."; return false; }
             if (item.HasIso && (item.FileSystem != "NTFS" || item.IsRemaining)) { message = $"Partition {item.Number} must be a fixed-size NTFS partition for bootable Windows media."; return false; }
+            if ((item.HasDrivers || item.HasScripts) && !item.HasIso) { message = $"Partition {item.Number} has Drivers or Scripts selected. Add a Windows ISO to that partition, or clear those selections."; return false; }
             if (item.IsRemaining) continue;
             if (!PartitionConfig.TryParseSize(item.SizeText, out var bytes)) { message = $"Partition {item.Number} needs a size such as 50 MB or 20 GB, or * for remaining space."; return false; }
             if (bytes < 32L * 1024 * 1024) { message = $"Partition {item.Number} must be at least 32 MB."; return false; }
@@ -1946,7 +1947,7 @@ public partial class MainWindow : Window
 
     private async Task AddPartitionScriptFilesAsync(PartitionConfig partition, Window owner)
     {
-        if (partition.FileSystem != "NTFS" || !partition.HasIso) return;
+        if (partition.FileSystem != "NTFS") return;
         var dialog = new OpenFileDialog
         {
             Title = $"Select Windows Setup scripts and supporting files for {partition.Name}",
@@ -1982,7 +1983,7 @@ public partial class MainWindow : Window
 
     private Task AddPartitionDriversAsync(PartitionConfig partition, Window owner)
     {
-        if (partition.FileSystem != "NTFS" || !partition.HasIso) return Task.CompletedTask;
+        if (partition.FileSystem != "NTFS") return Task.CompletedTask;
         var dialog = new DriverSourcesDialog(partition.DriverFolders, partition.DriverFiles,
             _preferences.ForceUnsignedDrivers, _preferences.Theme) { Owner = owner };
         if (dialog.ShowDialog() != true) return Task.CompletedTask;

@@ -377,7 +377,7 @@ public sealed class PartitionConfig
     public bool HasScripts => ScriptFiles.Count > 0;
     public bool HasDrivers => DriverFolders.Count + DriverFiles.Count > 0;
     public bool HasAnyContent => SourceFiles.Count + SourceFolders.Count + ScriptFiles.Count > 0 ||
-                                 !string.IsNullOrWhiteSpace(AutounattendSource) || HasIso;
+                                 !string.IsNullOrWhiteSpace(AutounattendSource) || HasIso || HasDrivers;
     public string AddedContentSummary
     {
         get

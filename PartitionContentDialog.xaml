@@ -57,16 +57,16 @@
                     </UniformGrid>
 
                     <StackPanel x:Name="IsoExtrasSection">
-                        <TextBlock Text="Windows ISO options" FontSize="14" FontWeight="SemiBold" Margin="0,2,0,2"/>
+                        <TextBlock Text="Windows ISO content" FontSize="14" FontWeight="SemiBold" Margin="0,2,0,2"/>
                         <TextBlock Foreground="{DynamicResource ThemeMuted}" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,9">
                             <Run Text="Drivers are injected into Windows. Scripts and supporting files run before OOBE."/><LineBreak/>
                             <Run Text="If no XML is selected, Autounattend.xml is created automatically."/>
                         </TextBlock>
                         <UniformGrid Columns="2">
                             <Button x:Name="DriversButton" Content="Drivers" Click="Drivers_Click" Margin="0,0,7,0"
-                                    ToolTip="Select, replace, or remove an INF driver folder"/>
+                                    ToolTip="Select drivers now; they will be injected after a Windows ISO is added"/>
                             <Button x:Name="ScriptsButton" Content="Scripts" Click="ScriptFiles_Click" Margin="7,0,0,0"
-                                    ToolTip="Select one or more scripts and any supporting files they require"/>
+                                    ToolTip="Select scripts now; they will run after a Windows ISO is added"/>
                         </UniformGrid>
                     </StackPanel>
                 </StackPanel>
