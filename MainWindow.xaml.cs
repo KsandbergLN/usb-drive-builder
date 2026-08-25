@@ -8,6 +8,7 @@ using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Xml.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -51,8 +52,10 @@ public partial class MainWindow : Window
     private double _activityProgressStart;
     private double _activityProgressEnd;
     private string _activityName = "Transfer";
-    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.4.52"}";
+    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.22"}";
     private const string MainPartitionDragFormat = "LaptopQaUsbBuilder.MainPartition";
+    private const string ScriptRunnerName = "LaptopQA-RunScripts.cmd";
+    private const string ScriptCleanupName = "LaptopQA-Cleanup.ps1";
 
     public MainWindow()
     {
@@ -115,9 +118,20 @@ public partial class MainWindow : Window
     private async void Build_Click(object sender, RoutedEventArgs e)
     {
         if (_isBuilding || _isPreflighting) return;
+        var logFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LaptopQAUsbBuilder", "Logs");
+        Directory.CreateDirectory(logFolder);
+        _logPath = Path.Combine(logFolder, $"Build-{DateTime.Now:yyyyMMdd-HHmmss}.log");
+        ActivityList.Items.Clear();
         SetPreflightState(true);
         await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.Render);
         try { await BuildCoreAsync(); }
+        catch (Exception ex)
+        {
+            Log($"Unexpected build error: {LogSanitizer.SanitizeException(ex)}");
+            if (_isBuilding) SetBuildingState(false);
+            MessageBox.Show($"The build could not continue.\n\n{ex.Message}\n\nLog: {_logPath}",
+                "Build failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
         finally { SetPreflightState(false); }
     }
 
@@ -155,8 +169,11 @@ public partial class MainWindow : Window
             return;
         }
 
-        var folderSources = _partitions.SelectMany(p => p.SourceFolders).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var folderSources = _partitions.SelectMany(p => p.SourceFolders.Concat(p.DriverFolders))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var fileSources = _partitions.SelectMany(p => p.SourceFiles
+                .Concat(p.ScriptFiles)
+                .Concat(p.DriverFiles)
                 .Concat(string.IsNullOrWhiteSpace(p.AutounattendSource) ? [] : [p.AutounattendSource])
                 .Concat(string.IsNullOrWhiteSpace(p.IsoSource) ? [] : [p.IsoSource]))
             .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
@@ -193,6 +210,30 @@ public partial class MainWindow : Window
                 }
         }
 
+        foreach (var partition in _partitions.Where(item => item.HasScripts))
+        {
+            try
+            {
+                var answerFileSource = partition.AutounattendSource ?? partition.FolderXmlSource;
+                partition.PreparedAutounattendXml = BuildScriptAutounattend(answerFileSource);
+                AddActivity(string.IsNullOrWhiteSpace(answerFileSource)
+                    ? $"Prepared a generated Autounattend.xml to run scripts for {partition.Name}."
+                    : $"Prepared the selected Autounattend.xml with the script runner for {partition.Name}.");
+            }
+            catch (IncompleteDriverPackageException ex)
+            {
+                SetStatus(Localization.Text(_preferences.Language, "Ready"), "#147A4B");
+                MessageBox.Show(ex.Message, "Incomplete driver package", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"The Windows Setup script command could not be added to Autounattend.xml.\n\n{ex.Message}",
+                    "Autounattend preparation failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+        }
+
         await RefreshAllPartitionContentSizesAsync();
 
         foreach (var partition in _partitions.Where(p => p.HasIso))
@@ -205,18 +246,46 @@ public partial class MainWindow : Window
             }
             try
             {
-                SetStatus("Validating ISO", "#B36A13");
+                SetStatus("Preparing Windows media", "#B36A13");
                 var isoInfo = await InspectBootableIsoAsync(partition.IsoSource!);
-                partition.ExtractedIsoBytes = isoInfo.TotalBytes;
+                if (partition.IsoEditionIndex is not { } editionIndex ||
+                    isoInfo.Editions.FirstOrDefault(item => item.Index == editionIndex) is not { } edition)
+                    throw new InvalidOperationException("The selected Windows edition is no longer present in this ISO. Select the ISO again and choose an edition.");
+                if (partition.HasDrivers)
+                {
+                    foreach (var folder in partition.DriverFolders)
+                        if (!Directory.EnumerateFiles(folder, "*.inf", SearchOption.AllDirectories).Any())
+                            throw new InvalidOperationException($"The selected drivers folder no longer contains INF packages: {folder}");
+                    foreach (var file in partition.DriverFiles)
+                        if (!Path.GetExtension(file).Equals(".inf", StringComparison.OrdinalIgnoreCase))
+                            throw new InvalidOperationException($"An individual driver selection is not an INF file: {file}");
+                }
+
+                partition.IsoEditionName = edition.Name;
+                partition.ForceUnsignedDrivers = partition.HasDrivers && _preferences.ForceUnsignedDrivers;
+                var selection = new WindowsIsoSelection(edition.Index, edition.Name,
+                    partition.DriverFolders.ToArray(), partition.DriverFiles.ToArray(), partition.ForceUnsignedDrivers);
+                var preparer = new WindowsMediaPreparer(
+                    message => { SetNonTransferActivity(message); AddActivity(message); },
+                    Log, MountIsoAsync, DismountIsoAsync);
+                var prepared = await preparer.PrepareAsync(partition.IsoSource!, isoInfo, selection);
+                partition.PreparedMediaPath = prepared.MediaPath;
+                partition.ExtractedIsoBytes = prepared.TotalBytes;
+                if (prepared.DriverRejections.Count > 0)
+                {
+                    AddActivity($"Driver servicing continued with {prepared.DriverRejections.Count} skipped package(s). See the build log for details.");
+                    foreach (var rejection in prepared.DriverRejections)
+                        Log($"Driver skipped from {rejection.Image} (DISM 0x8007000D invalid package data): {rejection.DriverPath}");
+                }
                 var requiredCapacity = EstimateRequiredPartitionCapacity(partition);
                 if (requiredCapacity > partitionBytes)
-                    throw new InvalidOperationException($"The ISO and other selected content need approximately {FormatBytes(requiredCapacity)}, but {partition.Name} is only {FormatBytes(partitionBytes)}.");
+                    throw new InvalidOperationException($"The prepared Windows media and other selected content need approximately {FormatBytes(requiredCapacity)}, but {partition.Name} is only {FormatBytes(partitionBytes)}.");
             }
             catch (Exception ex)
             {
                 SetStatus(Localization.Text(_preferences.Language, "Ready"), "#147A4B");
                 MessageBox.Show($"The selected ISO cannot be prepared as bootable Windows media.\n\n{ex.Message}",
-                    "ISO validation failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                    "Windows media preparation failed", MessageBoxButton.OK, MessageBoxImage.Error);
                 return;
             }
         }
@@ -229,21 +298,7 @@ public partial class MainWindow : Window
                 "Partition content will not fit", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
-        var queueSummary = string.Join("\n", queuedDisks.Select(d => $"Disk {d.Number} - {d.FriendlyName} - {FormatBytes(d.Size)}"));
         SetPreflightState(false);
-        SetStatus("Awaiting confirmation", "#B36A13");
-        var answer = MessageBox.Show($"Permanently erase and build these {queuedDisks.Count} USB drive(s) sequentially?\n\n{queueSummary}\n\nThis cannot be undone.",
-            "Final confirmation", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No);
-        if (answer != MessageBoxResult.Yes)
-        {
-            SetStatus(Localization.Text(_preferences.Language, "Ready"), "#147A4B");
-            return;
-        }
-
-        var logFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LaptopQAUsbBuilder", "Logs");
-        Directory.CreateDirectory(logFolder);
-        _logPath = Path.Combine(logFolder, $"Build-{DateTime.Now:yyyyMMdd-HHmmss}.log");
-        ActivityList.Items.Clear();
         SetBuildingState(true);
         SetStatus("Building", "#B36A13");
         CurrentEtaText.Text = "Current activity: Preparing drive...";
@@ -269,9 +324,7 @@ public partial class MainWindow : Window
                 BuildProgress.Value = 35;
                 foreach (var partition in _partitions) AddActivity($"Created {partition.Name} ({partition.SizeText}, {partition.FileSystem}).");
                 var copyPartitions = _partitions.Select((partition, index) => (partition, index))
-                    .Where(item => item.partition.SourceFolders.Count + item.partition.SourceFiles.Count > 0 ||
-                                   !string.IsNullOrWhiteSpace(item.partition.AutounattendSource) ||
-                                   !string.IsNullOrWhiteSpace(item.partition.IsoSource)).ToList();
+                    .Where(item => item.partition.HasAnyContent).ToList();
                 for (var copyIndex = 0; copyIndex < copyPartitions.Count; copyIndex++)
                 {
                     var (partition, partitionIndex) = copyPartitions[copyIndex];
@@ -406,8 +459,11 @@ public partial class MainWindow : Window
             .Concat(partition.SourceFiles.Select(path => (Path: path, IsFolder: false, TargetName: (string?)Path.GetFileName(path))))
             .ToList();
         var hasIso = partition.FileSystem == "NTFS" && !string.IsNullOrWhiteSpace(partition.IsoSource);
-        var hasAutounattend = (partition.FileSystem == "NTFS" || hasIso) && !string.IsNullOrWhiteSpace(partition.AutounattendSource);
-        var operationCount = sources.Count + (hasIso ? 1 : 0) + (hasAutounattend ? 1 : 0);
+        var hasAutounattend = (partition.FileSystem == "NTFS" || hasIso) &&
+                              (!string.IsNullOrWhiteSpace(partition.AutounattendSource) ||
+                               !string.IsNullOrWhiteSpace(partition.PreparedAutounattendXml));
+        var hasScripts = hasIso && partition.HasScripts;
+        var operationCount = sources.Count + (hasIso ? 1 : 0) + (hasScripts ? 1 : 0) + (hasAutounattend ? 1 : 0);
         if (operationCount == 0) { BuildProgress.Value = endProgress; return; }
 
         for (var index = 0; index < sources.Count; index++)
@@ -433,67 +489,211 @@ public partial class MainWindow : Window
         {
             var isoStart = startProgress + (endProgress - startProgress) * operationIndex / operationCount;
             var isoEnd = startProgress + (endProgress - startProgress) * ++operationIndex / operationCount;
-            await ExtractIsoContentsAsync(partition.IsoSource!, destination, partition.Name, isoStart, isoEnd);
+            await CopyPreparedWindowsMediaAsync(partition, destination, isoStart, isoEnd);
+        }
+
+        if (hasScripts)
+        {
+            var scriptsStart = startProgress + (endProgress - startProgress) * operationIndex / operationCount;
+            var scriptsEnd = startProgress + (endProgress - startProgress) * ++operationIndex / operationCount;
+            await CopyWindowsSetupScriptsAsync(partition, destination, scriptsStart, scriptsEnd);
         }
 
         if (hasAutounattend)
         {
             var xmlStart = startProgress + (endProgress - startProgress) * operationIndex / operationCount;
             var target = Path.Combine(destination, "Autounattend.xml");
-            AddActivity($"Copying Autounattend.xml to {partition.Name}.");
-            Log($"Copying {partition.AutounattendSource} to {target}");
-            await CopyFileWithProgressAsync(partition.AutounattendSource!, target, "Autounattend.xml", xmlStart, endProgress);
+            if (!string.IsNullOrWhiteSpace(partition.PreparedAutounattendXml))
+            {
+                BuildProgress.Value = xmlStart;
+                AddActivity($"Writing script-enabled Autounattend.xml to {partition.Name}.");
+                Log($"Writing generated script-enabled Autounattend.xml to {target}");
+                await File.WriteAllTextAsync(target, partition.PreparedAutounattendXml, new UTF8Encoding(false));
+                BuildProgress.Value = endProgress;
+            }
+            else
+            {
+                AddActivity($"Copying Autounattend.xml to {partition.Name}.");
+                Log($"Copying {partition.AutounattendSource} to {target}");
+                await CopyFileWithProgressAsync(partition.AutounattendSource!, target, "Autounattend.xml", xmlStart, endProgress);
+            }
         }
         AddActivity($"Selected content copied to {partition.Name}.");
     }
 
-    private async Task ExtractIsoContentsAsync(string isoPath, string destination, string partitionName, int startProgress, int endProgress)
+    private async Task CopyWindowsSetupScriptsAsync(PartitionConfig partition, string destination, int startProgress, int endProgress)
+    {
+        var scriptsDestination = Path.Combine(destination, "sources", "$OEM$", "$$", "Setup", "Scripts");
+        Directory.CreateDirectory(scriptsDestination);
+        var sources = partition.ScriptFiles.ToList();
+        AddActivity($"Adding {sources.Count} Windows Setup script/support source(s) to {partition.Name}.");
+
+        for (var index = 0; index < sources.Count; index++)
+        {
+            var sourceStart = startProgress + (endProgress - startProgress) * index / sources.Count;
+            var sourceEnd = startProgress + (endProgress - startProgress) * (index + 1) / sources.Count;
+            var source = sources[index];
+            var target = Path.Combine(scriptsDestination, Path.GetFileName(source));
+            AddActivity($"Copying Setup script/support file {Path.GetFileName(source)} to {partition.Name}.");
+            Log($"Copying {source} to {target}");
+            await CopyFileWithProgressAsync(source, target, Path.GetFileName(source), sourceStart, sourceEnd);
+        }
+
+        var runnerPath = Path.Combine(scriptsDestination, ScriptRunnerName);
+        var cleanupPath = Path.Combine(scriptsDestination, ScriptCleanupName);
+        await File.WriteAllTextAsync(runnerPath, BuildScriptRunner(partition.ScriptFiles), Encoding.ASCII);
+        await File.WriteAllTextAsync(cleanupPath, BuildScriptCleanup(partition.ScriptFiles), new UTF8Encoding(false));
+        BuildProgress.Value = endProgress;
+        AddActivity($"Windows Setup scripts and automatic cleanup added to sources\\$OEM$\\$$\\Setup\\Scripts on {partition.Name}.");
+    }
+
+    private static string BuildScriptAutounattend(string? sourcePath)
+    {
+        XNamespace unattend = "urn:schemas-microsoft-com:unattend";
+        XNamespace wcm = "http://schemas.microsoft.com/WMIConfig/2002/State";
+        XNamespace xsi = "http://www.w3.org/2001/XMLSchema-instance";
+        XDocument document;
+        if (string.IsNullOrWhiteSpace(sourcePath))
+        {
+            document = new XDocument(new XElement(unattend + "unattend",
+                new XAttribute(XNamespace.Xmlns + "wcm", wcm.NamespaceName),
+                new XAttribute(XNamespace.Xmlns + "xsi", xsi.NamespaceName)));
+        }
+        else
+        {
+            document = XDocument.Load(sourcePath, LoadOptions.PreserveWhitespace);
+        }
+
+        var root = document.Root;
+        if (root is null || root.Name != unattend + "unattend")
+            throw new InvalidOperationException("The selected XML is not a standard Windows unattend document (urn:schemas-microsoft-com:unattend). The original file was not changed.");
+        if (root.GetNamespaceOfPrefix("wcm") is null)
+            root.Add(new XAttribute(XNamespace.Xmlns + "wcm", wcm.NamespaceName));
+        if (root.GetNamespaceOfPrefix("xsi") is null)
+            root.Add(new XAttribute(XNamespace.Xmlns + "xsi", xsi.NamespaceName));
+
+        foreach (var oldCommand in root.Descendants(unattend + "RunSynchronousCommand")
+                     .Where(command => command.Element(unattend + "Path")?.Value.Contains(ScriptRunnerName, StringComparison.OrdinalIgnoreCase) == true)
+                     .ToList())
+            oldCommand.Remove();
+
+        var settings = root.Elements(unattend + "settings")
+            .FirstOrDefault(element => element.Attribute("pass")?.Value.Equals("specialize", StringComparison.OrdinalIgnoreCase) == true);
+        if (settings is null)
+        {
+            settings = new XElement(unattend + "settings", new XAttribute("pass", "specialize"));
+            root.Add(settings);
+        }
+
+        var component = settings.Elements(unattend + "component").FirstOrDefault(element =>
+            element.Attribute("name")?.Value.Equals("Microsoft-Windows-Deployment", StringComparison.OrdinalIgnoreCase) == true &&
+            element.Attribute("processorArchitecture")?.Value.Equals("amd64", StringComparison.OrdinalIgnoreCase) == true);
+        if (component is null)
+        {
+            component = new XElement(unattend + "component",
+                new XAttribute("name", "Microsoft-Windows-Deployment"),
+                new XAttribute("processorArchitecture", "amd64"),
+                new XAttribute("publicKeyToken", "31bf3856ad364e35"),
+                new XAttribute("language", "neutral"),
+                new XAttribute("versionScope", "nonSxS"));
+            settings.Add(component);
+        }
+
+        var runSynchronous = component.Element(unattend + "RunSynchronous");
+        if (runSynchronous is null)
+        {
+            runSynchronous = new XElement(unattend + "RunSynchronous");
+            component.Add(runSynchronous);
+        }
+        var nextOrder = runSynchronous.Elements(unattend + "RunSynchronousCommand")
+            .Select(command => int.TryParse(command.Element(unattend + "Order")?.Value, out var order) ? order : 0)
+            .DefaultIfEmpty(0).Max() + 1;
+        if (nextOrder > 500)
+            throw new InvalidOperationException("The selected Autounattend.xml already uses the maximum RunSynchronous order. Remove or reorder an existing specialize command and try again.");
+        runSynchronous.Add(new XElement(unattend + "RunSynchronousCommand",
+            new XAttribute(wcm + "action", "add"),
+            new XElement(unattend + "Order", nextOrder),
+            new XElement(unattend + "Description", "Run Laptop QA Windows Setup scripts"),
+            new XElement(unattend + "Path", $"cmd.exe /d /c \"%WINDIR%\\Setup\\Scripts\\{ScriptRunnerName}\"")));
+
+        document.Declaration = null;
+        return "<?xml version=\"1.0\" encoding=\"utf-8\"?>" + Environment.NewLine + document;
+    }
+
+    private static string BuildScriptRunner(IEnumerable<string> scriptPaths)
+    {
+        var lines = new List<string> { "@echo off", "setlocal EnableExtensions DisableDelayedExpansion" };
+        foreach (var path in scriptPaths)
+        {
+            var name = EscapeBatchLiteral(Path.GetFileName(path));
+            switch (Path.GetExtension(path).ToLowerInvariant())
+            {
+                case ".cmd":
+                case ".bat":
+                    lines.Add($"\"%ComSpec%\" /d /s /c \"\"%~dp0{name}\"\"");
+                    break;
+                case ".ps1":
+                    lines.Add($"\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0{name}\"");
+                    break;
+                case ".vbs":
+                case ".js":
+                case ".wsf":
+                    lines.Add($"\"%SystemRoot%\\System32\\cscript.exe\" //B //NoLogo \"%~dp0{name}\"");
+                    break;
+            }
+        }
+        lines.Add($"start \"\" /b \"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0{ScriptCleanupName}\"");
+        lines.Add("endlocal");
+        lines.Add("exit /b 0");
+        return string.Join("\r\n", lines) + "\r\n";
+    }
+
+    private static string BuildScriptCleanup(IEnumerable<string> scriptPaths)
+    {
+        var names = scriptPaths.Select(Path.GetFileName)
+            .Append(ScriptRunnerName)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Select(name => $"'{name!.Replace("'", "''")}'");
+        return string.Join(Environment.NewLine,
+            "$ErrorActionPreference = 'SilentlyContinue'",
+            "Start-Sleep -Seconds 2",
+            "$scriptRoot = Split-Path -LiteralPath $PSCommandPath -Parent",
+            $"$removeNames = @({string.Join(", ", names)})",
+            "foreach ($name in $removeNames) { Remove-Item -LiteralPath (Join-Path $scriptRoot $name) -Force }",
+            "$cleanupPath = $PSCommandPath",
+            "Remove-Item -LiteralPath $cleanupPath -Force",
+            "if (-not (Get-ChildItem -LiteralPath $scriptRoot -Force | Select-Object -First 1)) { Remove-Item -LiteralPath $scriptRoot -Force }") + Environment.NewLine;
+    }
+
+    private static string EscapeBatchLiteral(string value) => value.Replace("%", "%%");
+
+    private async Task CopyPreparedWindowsMediaAsync(PartitionConfig partition, string destination, int startProgress, int endProgress)
     {
         BuildProgress.Value = startProgress;
-        SetNonTransferActivity("Mounting ISO...");
-        AddActivity($"Mounting {Path.GetFileName(isoPath)} for {partitionName}.");
-        Log($"Mounting ISO {isoPath}");
-        var driveLetter = await MountIsoAsync(isoPath);
-
-        try
-        {
-            var sourceRoot = $"{driveLetter}:\\";
-            InspectMountedWindowsIso(sourceRoot);
-            AddActivity($"Extracting {Path.GetFileName(isoPath)} into {partitionName}.");
-            await CopySourceAsync(sourceRoot, destination, $"{partitionName} ISO", startProgress, endProgress);
-
-            if (!File.Exists(Path.Combine(destination, "efi", "boot", "bootx64.efi")) ||
-                !File.Exists(Path.Combine(destination, "sources", "boot.wim")) ||
-                !File.Exists(Path.Combine(destination, "bootmgr")) ||
-                !File.Exists(Path.Combine(destination, "boot", "bcd")) ||
-                !File.Exists(Path.Combine(destination, "efi", "microsoft", "boot", "bcd")))
-                throw new InvalidOperationException("Boot-file verification failed after extracting the Windows ISO.");
-            AddActivity($"Complete ISO boot set verified on {partitionName}.");
-            AddActivity($"{partitionName} is prepared as NTFS Windows media for supported Dell USB sticks.");
-        }
-        finally
-        {
-            try
-            {
-                await DismountIsoAsync(isoPath);
-                Log($"Dismounted ISO {isoPath}");
-            }
-            catch (Exception ex)
-            {
-                AddActivity($"Warning: Windows could not dismount {Path.GetFileName(isoPath)} automatically.");
-                Log($"ISO dismount warning for {isoPath}: {LogSanitizer.SanitizeException(ex)}");
-            }
-        }
+        if (string.IsNullOrWhiteSpace(partition.PreparedMediaPath) || !Directory.Exists(partition.PreparedMediaPath))
+            throw new InvalidOperationException("Prepared Windows media is unavailable. Start the build again to recreate it.");
+        SetNonTransferActivity($"Copying {partition.IsoEditionName ?? "Windows"} media...");
+        AddActivity($"Copying prepared {partition.IsoEditionName ?? "Windows"} media to {partition.Name}.");
+        await CopySourceAsync(partition.PreparedMediaPath, destination, $"{partition.Name} Windows media", startProgress, endProgress);
+        if (!File.Exists(Path.Combine(destination, "efi", "boot", "bootx64.efi")) ||
+            !File.Exists(Path.Combine(destination, "sources", "boot.wim")) ||
+            !File.Exists(Path.Combine(destination, "sources", "install.wim")) ||
+            !File.Exists(Path.Combine(destination, "bootmgr")) ||
+            !File.Exists(Path.Combine(destination, "boot", "bcd")) ||
+            !File.Exists(Path.Combine(destination, "efi", "microsoft", "boot", "bcd")))
+            throw new InvalidOperationException("Boot-file verification failed after copying the prepared Windows media.");
+        AddActivity($"Complete {partition.IsoEditionName ?? "Windows"} boot set verified on {partition.Name}.");
     }
 
     private async Task<BootableIsoInfo> InspectBootableIsoAsync(string isoPath)
     {
         var driveLetter = await MountIsoAsync(isoPath);
-        try { return InspectMountedWindowsIso($"{driveLetter}:\\"); }
+        try { return await InspectMountedWindowsIsoAsync($"{driveLetter}:\\"); }
         finally { await DismountIsoAsync(isoPath); }
     }
 
-    private static BootableIsoInfo InspectMountedWindowsIso(string root)
+    private async Task<BootableIsoInfo> InspectMountedWindowsIsoAsync(string root)
     {
         var bootFile = Path.Combine(root, "efi", "boot", "bootx64.efi");
         var bootWim = Path.Combine(root, "sources", "boot.wim");
@@ -503,11 +703,31 @@ public partial class MainWindow : Window
         var installWim = Path.Combine(root, "sources", "install.wim");
         var installEsd = Path.Combine(root, "sources", "install.esd");
         if (!File.Exists(bootFile) || !File.Exists(bootWim) || !File.Exists(bootManager) || !File.Exists(biosBcd) || !File.Exists(uefiBcd))
-            throw new InvalidOperationException("This is not a complete supported 64-bit Windows installer ISO. One or more required EFI, boot manager, BCD, or boot.wim files are missing.");
+            throw new InvalidOperationException("This is not a complete supported 64-bit Windows installer ISO. One or more required Windows Setup boot files are missing.");
         if (!File.Exists(installWim) && !File.Exists(installEsd))
             throw new InvalidOperationException("Windows Setup image sources\\install.wim or sources\\install.esd was not found.");
 
-        return new BootableIsoInfo(CalculateDirectoryBytes(root));
+        var installImage = File.Exists(installWim) ? installWim : installEsd;
+        var editions = await GetWindowsImageEditionsAsync(installImage);
+        if (editions.Count == 0) throw new InvalidOperationException("Windows Setup did not report any installable editions in the selected ISO.");
+        return new BootableIsoInfo(CalculateDirectoryBytes(root), Path.GetFileName(installImage), editions);
+    }
+
+    private async Task<List<WindowsImageEdition>> GetWindowsImageEditionsAsync(string imagePath)
+    {
+        var logFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LaptopQAUsbBuilder", "Logs");
+        Directory.CreateDirectory(logFolder);
+        var dismLog = Path.Combine(logFolder, "DISM-inspect.log");
+        var script = $"@(Get-WindowsImage -ImagePath '{PsQuote(imagePath)}' -LogPath '{PsQuote(dismLog)}' -ErrorAction Stop|ForEach-Object{{[pscustomobject]@{{Index=$_.ImageIndex;Name=$_.ImageName;Description=$_.ImageDescription;Size=[long]$_.ImageSize}}}})|ConvertTo-Json -Compress";
+        var json = await RunPowerShellAsync(script);
+        if (string.IsNullOrWhiteSpace(json)) return [];
+        using var document = JsonDocument.Parse(json);
+        return document.RootElement.ValueKind switch
+        {
+            JsonValueKind.Array => JsonSerializer.Deserialize<List<WindowsImageEdition>>(json, _jsonOptions) ?? [],
+            JsonValueKind.Object => JsonSerializer.Deserialize<WindowsImageEdition>(json, _jsonOptions) is { } edition ? [edition] : [],
+            _ => []
+        };
     }
 
     private static async Task<string> MountIsoAsync(string isoPath)
@@ -697,6 +917,7 @@ public partial class MainWindow : Window
         }
 
         var files = partition.SourceFiles
+            .Concat(partition.ScriptFiles)
             .Concat(string.IsNullOrWhiteSpace(partition.AutounattendSource) ? [] : [partition.AutounattendSource])
             .Where(path => !string.IsNullOrWhiteSpace(path))
             .Distinct(StringComparer.OrdinalIgnoreCase);
@@ -1060,14 +1281,14 @@ public partial class MainWindow : Window
         AddPartitionButton.IsEnabled = interactive;
         MainDefaultsButton.IsEnabled = interactive;
         ConfirmText.IsEnabled = interactive;
-        Mouse.OverrideCursor = preflighting ? Cursors.Wait : null;
+        Cursor = preflighting ? Cursors.Wait : null;
         if (preflighting)
         {
             SetStatus("Preparing build", "#B36A13");
             BuildProgress.IsIndeterminate = true;
             CurrentEtaText.Text = "Current activity: Checking targets, sources, and ISO media...";
             QueueEtaText.Visibility = Visibility.Collapsed;
-            AddActivity("Preparing build: checking targets, sources, and ISO media before confirmation.");
+            AddActivity("Preparing build: checking targets, sources, and ISO media before erasure.");
         }
         else if (!_isBuilding)
         {
@@ -1226,7 +1447,7 @@ public partial class MainWindow : Window
     {
         if ((sender as FrameworkElement)?.DataContext is PartitionConfig partition)
         {
-            if (partition.FileSystem != "NTFS") { partition.IsoSource = null; partition.ExtractedIsoBytes = null; }
+            if (partition.FileSystem != "NTFS") partition.ClearIsoSelection();
             if (partition.FileSystem != "NTFS" && !partition.HasIso) partition.AutounattendSource = null;
         }
         if (IsLoaded) QueuePartitionConfigurationChanged();
@@ -1570,7 +1791,7 @@ public partial class MainWindow : Window
     private void Config_Click(object sender, RoutedEventArgs e)
     {
         var originalLanguage = _preferences.Language;
-        var dialog = new ConfigWindow(_defaultPartitions, _preferences.Language, _preferences.Theme) { Owner = this };
+        var dialog = new ConfigWindow(_defaultPartitions, _preferences.Language, _preferences.Theme, _preferences.ForceUnsignedDrivers) { Owner = this };
         if (dialog.ShowDialog() != true)
         {
             Localization.ApplyCulture(originalLanguage);
@@ -1579,6 +1800,7 @@ public partial class MainWindow : Window
         _defaultPartitions = dialog.Result.Select(p => p.Clone()).ToList();
         _preferences.Language = dialog.SelectedLanguage;
         _preferences.Theme = dialog.SelectedTheme;
+        _preferences.ForceUnsignedDrivers = dialog.ForceUnsignedDrivers;
         SaveDefaultPartitionConfig();
         SavePreferences();
         Localization.ApplyCulture(_preferences.Language);
@@ -1601,7 +1823,7 @@ public partial class MainWindow : Window
 
     private void MainDefaults_Click(object sender, RoutedEventArgs e)
     {
-        var hasSources = _partitions.Any(p => p.SourceFiles.Count + p.SourceFolders.Count > 0 || !string.IsNullOrWhiteSpace(p.AutounattendSource) || !string.IsNullOrWhiteSpace(p.IsoSource));
+        var hasSources = _partitions.Any(p => p.HasAnyContent);
         if (hasSources && MessageBox.Show("Restore the configured default partitions and clear the current content selections?", "Restore defaults", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
         _partitions = _defaultPartitions.Select(p => p.Clone()).ToList();
         MainPartitionList.ItemsSource = _partitions;
@@ -1613,43 +1835,63 @@ public partial class MainWindow : Window
     {
         if (_partitions.Count <= 1) { MessageBox.Show("At least one partition is required.", "Partition required", MessageBoxButton.OK, MessageBoxImage.Information); return; }
         var item = (sender as FrameworkElement)?.DataContext as PartitionConfig ?? MainPartitionList.SelectedItem as PartitionConfig ?? _partitions[^1];
-        if ((item.SourceFiles.Count + item.SourceFolders.Count > 0 || !string.IsNullOrWhiteSpace(item.AutounattendSource) || !string.IsNullOrWhiteSpace(item.IsoSource)) && MessageBox.Show($"Remove {item.Name} and its selected content list?", "Remove partition", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+        if (item.HasAnyContent && MessageBox.Show($"Remove {item.Name} and its selected content list?", "Remove partition", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
         _partitions.Remove(item);
         if (!_partitions.Any(p => p.IsRemaining)) _partitions[^1].SizeText = "*";
         PartitionConfigurationChanged();
     }
 
-    private async void PartitionFiles_Click(object sender, RoutedEventArgs e)
+    private async void PartitionContentAdd_Click(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is not PartitionConfig partition) return;
+        var dialog = new PartitionContentDialog(partition, _preferences.Theme) { Owner = this };
+        dialog.ActionHandler = async (action, owner) => await HandlePartitionContentActionAsync(partition, action, owner);
+        dialog.ShowDialog();
+    }
+
+    private async Task HandlePartitionContentActionAsync(PartitionConfig partition, PartitionContentAction action, Window owner)
+    {
+        switch (action)
+        {
+            case PartitionContentAction.Files: await AddPartitionFilesAsync(partition, owner); break;
+            case PartitionContentAction.Folder: await AddPartitionFolderAsync(partition, owner); break;
+            case PartitionContentAction.Autounattend: await AddPartitionAutounattendAsync(partition, owner); break;
+            case PartitionContentAction.Iso: await AddPartitionIsoAsync(partition, owner); break;
+            case PartitionContentAction.ScriptFiles: await AddPartitionScriptFilesAsync(partition, owner); break;
+            case PartitionContentAction.Drivers: await AddPartitionDriversAsync(partition, owner); break;
+        }
+    }
+
+    private async Task AddPartitionFilesAsync(PartitionConfig partition, Window owner)
+    {
         var dialog = new OpenFileDialog { Title = $"Select files for {partition.Name}", Filter = "All files (*.*)|*.*", CheckFileExists = true, Multiselect = true };
-        if (dialog.ShowDialog() != true) return;
+        if (dialog.ShowDialog(owner) != true) return;
         foreach (var path in dialog.FileNames)
             if (!partition.SourceFiles.Any(existing => existing.Equals(path, StringComparison.OrdinalIgnoreCase))) partition.SourceFiles.Add(path);
         await RefreshPartitionContentSizeAsync(partition, true); UpdateBuildButton();
     }
 
-    private async void PartitionFolders_Click(object sender, RoutedEventArgs e)
+    private async Task AddPartitionFolderAsync(PartitionConfig partition, Window owner)
     {
-        if ((sender as FrameworkElement)?.DataContext is not PartitionConfig partition) return;
         var dialog = new OpenFolderDialog { Title = $"Select a folder for {partition.Name}", Multiselect = false };
-        if (dialog.ShowDialog() != true) return;
+        if (dialog.ShowDialog(owner) != true) return;
         if (!partition.SourceFolders.Any(existing => existing.Equals(dialog.FolderName, StringComparison.OrdinalIgnoreCase))) partition.SourceFolders.Add(dialog.FolderName);
         await RefreshPartitionContentSizeAsync(partition, true); UpdateBuildButton();
     }
 
-    private async void PartitionAutounattend_Click(object sender, RoutedEventArgs e)
+    private async Task AddPartitionAutounattendAsync(PartitionConfig partition, Window owner)
     {
-        if ((sender as FrameworkElement)?.DataContext is not PartitionConfig partition || (partition.FileSystem != "NTFS" && !partition.HasIso)) return;
+        if (partition.FileSystem != "NTFS" && !partition.HasIso) return;
         var dialog = new OpenFileDialog { Title = $"Select Autounattend.xml for {partition.Name}", Filter = "XML files (*.xml)|*.xml|All files (*.*)|*.*", CheckFileExists = true, Multiselect = false };
-        if (dialog.ShowDialog() != true) return;
+        if (dialog.ShowDialog(owner) != true) return;
         partition.AutounattendSource = dialog.FileName;
+        partition.PreparedAutounattendXml = null;
         await RefreshPartitionContentSizeAsync(partition, true); UpdateBuildButton();
     }
 
-    private void PartitionIso_Click(object sender, RoutedEventArgs e)
+    private async Task AddPartitionIsoAsync(PartitionConfig partition, Window owner)
     {
-        if ((sender as FrameworkElement)?.DataContext is not PartitionConfig partition || partition.FileSystem != "NTFS") return;
+        if (partition.FileSystem != "NTFS") return;
         if (_partitions.Any(item => !ReferenceEquals(item, partition) && item.HasIso))
         {
             MessageBox.Show("Only one bootable Windows ISO partition is supported on each USB drive. Clear the ISO from the other partition first.",
@@ -1669,27 +1911,104 @@ public partial class MainWindow : Window
             return;
         }
         var dialog = new OpenFileDialog { Title = $"Select an ISO for {partition.Name}", Filter = "ISO images (*.iso)|*.iso", CheckFileExists = true, Multiselect = false };
-        if (dialog.ShowDialog() != true) return;
+        if (dialog.ShowDialog(owner) != true) return;
         if (new FileInfo(dialog.FileName).Length + 256L * 1024 * 1024 > partitionBytes)
         {
             MessageBox.Show($"The selected ISO needs more room than partition {partition.Name}. Increase the partition size and select it again.",
                 "Boot partition too small", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
-        partition.IsoSource = dialog.FileName;
+        try
+        {
+            SetStatus("Inspecting Windows ISO", "#B36A13");
+            Cursor = Cursors.Wait;
+            var isoInfo = await InspectBootableIsoAsync(dialog.FileName);
+            Cursor = null;
+            var options = new WindowsIsoOptionsDialog(dialog.FileName, isoInfo.Editions, _preferences.Theme) { Owner = owner };
+            if (options.ShowDialog() != true || options.Selection is not { } selection) return;
+            partition.IsoSource = dialog.FileName;
+            partition.IsoEditionIndex = selection.EditionIndex;
+            partition.IsoEditionName = selection.EditionName;
+            partition.PreparedMediaPath = null;
+            partition.ExtractedIsoBytes = isoInfo.TotalBytes;
+            PartitionConfigurationChanged();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"The selected ISO could not be inspected.\n\n{ex.Message}", "ISO inspection failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            Cursor = null;
+            SetStatus(Localization.Text(_preferences.Language, "Ready"), "#147A4B");
+        }
+    }
+
+    private async Task AddPartitionScriptFilesAsync(PartitionConfig partition, Window owner)
+    {
+        if (partition.FileSystem != "NTFS" || !partition.HasIso) return;
+        var dialog = new OpenFileDialog
+        {
+            Title = $"Select Windows Setup scripts and supporting files for {partition.Name}",
+            Filter = "All files (*.*)|*.*",
+            CheckFileExists = true,
+            Multiselect = true
+        };
+        if (dialog.ShowDialog(owner) != true) return;
+        var combined = partition.ScriptFiles.Concat(dialog.FileNames).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var reserved = combined.Select(Path.GetFileName).FirstOrDefault(name =>
+            string.Equals(name, ScriptRunnerName, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(name, ScriptCleanupName, StringComparison.OrdinalIgnoreCase));
+        if (reserved is not null)
+        {
+            MessageBox.Show($"'{reserved}' is reserved for the app-generated script runner. Rename that script before adding it.",
+                "Reserved script name", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        var duplicateName = combined.GroupBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault(group => group.Count() > 1)?.Key;
+        if (duplicateName is not null)
+        {
+            MessageBox.Show($"Two selected scripts are named '{duplicateName}'. Script filenames must be unique even when they come from different folders.",
+                "Duplicate script name", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        foreach (var path in dialog.FileNames)
+            if (!partition.ScriptFiles.Contains(path, StringComparer.OrdinalIgnoreCase)) partition.ScriptFiles.Add(path);
+        partition.PreparedAutounattendXml = null;
+        await RefreshPartitionContentSizeAsync(partition, true);
+        UpdateBuildButton();
+    }
+
+    private Task AddPartitionDriversAsync(PartitionConfig partition, Window owner)
+    {
+        if (partition.FileSystem != "NTFS" || !partition.HasIso) return Task.CompletedTask;
+        var dialog = new DriverSourcesDialog(partition.DriverFolders, partition.DriverFiles,
+            _preferences.ForceUnsignedDrivers, _preferences.Theme) { Owner = owner };
+        if (dialog.ShowDialog() != true) return Task.CompletedTask;
+        partition.DriverFolders.Clear();
+        foreach (var path in dialog.DriverFolders) partition.DriverFolders.Add(path);
+        partition.DriverFiles.Clear();
+        foreach (var path in dialog.DriverFiles) partition.DriverFiles.Add(path);
+        partition.ForceUnsignedDrivers = partition.HasDrivers && _preferences.ForceUnsignedDrivers;
+        partition.PreparedMediaPath = null;
         partition.ExtractedIsoBytes = null;
         PartitionConfigurationChanged();
+        AddActivity(partition.HasDrivers
+            ? $"Driver injection updated for {partition.Name}: {partition.DriverFolders.Count} folder(s), {partition.DriverFiles.Count} individual INF file(s)."
+            : $"Driver injection removed from {partition.Name}.");
+        return Task.CompletedTask;
     }
 
     private void PartitionSourcesClear_Click(object sender, RoutedEventArgs e)
     {
-        if ((sender as FrameworkElement)?.DataContext is not PartitionConfig partition || (partition.SourceFiles.Count + partition.SourceFolders.Count == 0 && string.IsNullOrWhiteSpace(partition.AutounattendSource) && string.IsNullOrWhiteSpace(partition.IsoSource))) return;
-        if (MessageBox.Show($"Clear all selected files and folders for {partition.Name}?", "Clear partition content", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
-        partition.SourceFiles.Clear(); partition.SourceFolders.Clear(); partition.AutounattendSource = null; partition.IsoSource = null; partition.SelectedContentBytes = 0; partition.LargestSelectedFileBytes = 0; partition.ExtractedIsoBytes = null; MainPartitionList.Items.Refresh(); UpdatePartitionPreview(SelectedDisks()); UpdateBuildButton();
+        if ((sender as FrameworkElement)?.DataContext is not PartitionConfig partition || !partition.HasAnyContent) return;
+        if (MessageBox.Show($"Clear all selected content for {partition.Name}?", "Clear partition content", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+        partition.SourceFiles.Clear(); partition.SourceFolders.Clear(); partition.AutounattendSource = null; partition.ClearIsoSelection(); partition.SelectedContentBytes = 0; partition.LargestSelectedFileBytes = 0; MainPartitionList.Items.Refresh(); UpdatePartitionPreview(SelectedDisks()); UpdateBuildButton();
     }
 }
 
-public sealed record BootableIsoInfo(long TotalBytes);
+public sealed record BootableIsoInfo(long TotalBytes, string InstallImageName, IReadOnlyList<WindowsImageEdition> Editions);
 
 public sealed class UsbDisk
 {

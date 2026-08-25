@@ -31,6 +31,10 @@
         <SolidColorBrush x:Key="DriveText" Color="#17272D" />
         <SolidColorBrush x:Key="DriveMutedText" Color="#526970" />
         <SolidColorBrush x:Key="DriveHoverBorder" Color="#526970" />
+        <SolidColorBrush x:Key="AddButtonBackground" Color="#D7F3E5" />
+        <SolidColorBrush x:Key="AddButtonForeground" Color="#147A4B" />
+        <SolidColorBrush x:Key="ClearButtonBackground" Color="#D8A2A3" />
+        <SolidColorBrush x:Key="ClearButtonForeground" Color="#8E292F" />
         <Style TargetType="Button">
             <Setter Property="FontSize" Value="14"/><Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="Foreground" Value="White"/><Setter Property="Background" Value="{StaticResource Slate}"/>
@@ -150,30 +154,32 @@
                             <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                 <StackPanel>
                                     <TextBlock x:Name="PartitionEditorTitle" Style="{StaticResource SectionTitle}" Text="Partition Settings" Margin="0,0,0,2"/>
-                                    <TextBlock Text="ISO creates NTFS Windows media for supported Dell USB sticks; FAT32 remains diagnostics-only. XML adds Autounattend.xml." Style="{StaticResource Caption}" Margin="2,0,0,7"/>
+                                    <TextBlock Text="Use Add for files, folders, XML, Windows ISO media, drivers, and Setup scripts." Style="{StaticResource Caption}" Margin="2,0,0,7"/>
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Orientation="Horizontal">
-                                    <Button x:Name="AddPartitionButton" Style="{StaticResource CircleButton}" Content="+" Click="AddPartition_Click" Width="32" Height="32" Padding="0" FontSize="18" Background="#16844F" Margin="0,0,6,0" ToolTip="Add a partition"/>
+                                    <Button x:Name="AddPartitionButton" Style="{StaticResource CircleButton}" Content="+" Click="AddPartition_Click" Width="32" Height="32" Padding="0" FontSize="18" Background="{DynamicResource AddButtonBackground}" Foreground="{DynamicResource AddButtonForeground}" Margin="0,0,6,0" ToolTip="Add a partition"/>
                                     <Button x:Name="MainDefaultsButton" Content="Defaults" Click="MainDefaults_Click" Padding="13,5" ToolTip="Restore the default partitions configured in Settings"/>
                                 </StackPanel>
                             </Grid>
                             <ListBox x:Name="MainPartitionList" Grid.Row="1" MaxHeight="250" BorderThickness="0" Background="Transparent" SelectionMode="Single" ScrollViewer.VerticalScrollBarVisibility="Auto" AllowDrop="True" PreviewMouseMove="MainPartitionList_PreviewMouseMove" PreviewMouseLeftButtonUp="MainPartitionList_PreviewMouseLeftButtonUp" DragOver="MainPartitionList_DragOver" DragLeave="MainPartitionList_DragLeave" Drop="MainPartitionList_Drop">
                                 <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem"><Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0"/><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/><Setter Property="FocusVisualStyle" Value="{x:Null}"/><Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem"><ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"/></ControlTemplate></Setter.Value></Setter></Style></ListBox.ItemContainerStyle>
                                 <ListBox.ItemTemplate><DataTemplate><Grid Margin="0,0,0,7"><Grid.ColumnDefinitions><ColumnDefinition Width="36"/><ColumnDefinition Width="*"/><ColumnDefinition Width="30"/></Grid.ColumnDefinitions>
-                                    <Button Style="{StaticResource CircleButton}" Content="−" Click="RemovePartition_Click" Width="28" Height="28" Padding="0" FontSize="18" Background="#B33A3A" ToolTip="Remove this partition" VerticalAlignment="Center"/>
+                                    <Button Style="{StaticResource CircleButton}" Content="−" Click="RemovePartition_Click" Width="28" Height="28" Padding="0" FontSize="18" Background="{DynamicResource ClearButtonBackground}" Foreground="{DynamicResource ClearButtonForeground}" ToolTip="Remove this partition" VerticalAlignment="Center"/>
                                     <Border x:Name="PartitionRowCard" Grid.Column="1" Background="{DynamicResource ThemeInput}" BorderBrush="{DynamicResource ThemeStroke}" BorderThickness="1" CornerRadius="12" Padding="10,7">
-                                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="34"/><ColumnDefinition Width="1.1*"/><ColumnDefinition Width="108"/><ColumnDefinition Width="92"/><ColumnDefinition Width="2.2*"/></Grid.ColumnDefinitions>
+                                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="34"/><ColumnDefinition Width="1.1*"/><ColumnDefinition Width="108"/><ColumnDefinition Width="92"/><ColumnDefinition Width="200"/></Grid.ColumnDefinitions>
                                         <Border Width="28" Height="28" CornerRadius="14" Background="{DynamicResource ThemeSelection}" VerticalAlignment="Center"><TextBlock Text="{Binding Number}" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
                                         <StackPanel Grid.Column="1" Margin="5,0,8,0"><TextBlock Text="Volume label" Style="{StaticResource Caption}" Margin="2,0,0,3"/><TextBox Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource Field}" Height="32" Padding="8,3" TextChanged="PartitionField_TextChanged"/></StackPanel>
                                         <StackPanel Grid.Column="2" Margin="0,0,8,0"><TextBlock Text="Size (MB, GB, or *)" Style="{StaticResource Caption}" Margin="2,0,0,3" TextTrimming="CharacterEllipsis"/><TextBox Text="{Binding SizeText, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource SizeField}" Height="32" Padding="8,3" TextChanged="PartitionField_TextChanged"/></StackPanel>
                                         <StackPanel Grid.Column="3" Margin="0,0,8,0"><TextBlock Text="Format" Style="{StaticResource Caption}" Margin="2,0,0,3"/><ComboBox ItemsSource="{x:Static local:PartitionConfig.AllowedFormats}" SelectedItem="{Binding FileSystem, UpdateSourceTrigger=PropertyChanged}" Height="32" Foreground="{DynamicResource ThemeText}" Background="{DynamicResource ThemeInput}" BorderBrush="{DynamicResource ThemeStroke}" SelectionChanged="PartitionFormat_SelectionChanged"/></StackPanel>
-                                        <StackPanel Grid.Column="4" VerticalAlignment="Bottom"><TextBlock Text="Files and folders" Style="{StaticResource Caption}" Margin="2,0,0,3"/><StackPanel Orientation="Horizontal" ToolTip="{Binding SourcesToolTip}">
-                                            <Button Content="{Binding FilesButtonText}" Click="PartitionFiles_Click" Padding="9,5" Margin="0,0,5,0"/>
-                                            <Button Content="{Binding FoldersButtonText}" Click="PartitionFolders_Click" Padding="9,5" Margin="0,0,5,0"/>
-                                            <Button Content="{Binding AutounattendButtonText}" Click="PartitionAutounattend_Click" Padding="9,5" Margin="0,0,5,0" ToolTip="{Binding AutounattendToolTip}"><Button.Style><Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding FileSystem}" Value="NTFS"><Setter Property="Visibility" Value="Visible"/></DataTrigger><DataTrigger Binding="{Binding HasIso}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger><DataTrigger Binding="{Binding HasAutounattend}" Value="True"><Setter Property="Background" Value="#20B86A"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
-                                            <Button Content="{Binding IsoButtonText}" Click="PartitionIso_Click" Padding="9,5" Margin="0,0,5,0" ToolTip="{Binding IsoToolTip}"><Button.Style><Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding FileSystem}" Value="NTFS"><Setter Property="Visibility" Value="Visible"/></DataTrigger><DataTrigger Binding="{Binding HasIso}" Value="True"><Setter Property="Background" Value="#20B86A"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
-                                            <Button Content="Clear" Click="PartitionSourcesClear_Click" Padding="8,5" ToolTip="Clear all selected content for this partition"/>
-                                        </StackPanel></StackPanel>
+                                        <Grid Grid.Column="4" VerticalAlignment="Center" ToolTip="{Binding SourcesToolTip}">
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="62"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                            <StackPanel>
+                                                <Button Content="Add" Click="PartitionContentAdd_Click" Width="58" Height="27" Padding="8,3" Margin="0,0,0,4" Background="{DynamicResource AddButtonBackground}" Foreground="{DynamicResource AddButtonForeground}" ToolTip="Add files, folders, XML, ISO, drivers, or Windows Setup scripts"/>
+                                                <Button Content="Clear" Click="PartitionSourcesClear_Click" Width="58" Height="27" Padding="8,3" Background="{DynamicResource ClearButtonBackground}" Foreground="{DynamicResource ClearButtonForeground}" ToolTip="Clear all selected content for this partition"/>
+                                            </StackPanel>
+                                            <TextBlock Grid.Column="1" Text="{Binding AddedContentSummary}" Foreground="{DynamicResource DriveSelectedBorder}"
+                                                       FontWeight="SemiBold" FontSize="12" TextWrapping="Wrap" VerticalAlignment="Center" Margin="9,0,0,0"/>
+                                        </Grid>
                                     </Grid></Border>
                                     <Border Grid.Column="2" Background="Transparent" Width="26" Height="34" Padding="4" Cursor="SizeNS" ToolTip="Drag to reorder" MouseLeftButtonDown="PartitionDragHandle_MouseLeftButtonDown"><StackPanel VerticalAlignment="Center"><Rectangle Width="14" Height="2" RadiusX="1" Fill="{DynamicResource ThemeMuted}" Margin="0,0,0,4"/><Rectangle Width="14" Height="2" RadiusX="1" Fill="{DynamicResource ThemeMuted}"/></StackPanel></Border>
                                 </Grid>
@@ -204,7 +210,7 @@
                         <Border Background="{DynamicResource WarningBackground}" BorderBrush="{DynamicResource WarningBorder}" BorderThickness="1" CornerRadius="12" Padding="10,8" Margin="0,0,0,14"><TextBlock x:Name="WarningText" Text="WARNING: Every partition and file on the selected USB drives will be permanently erased." Foreground="{DynamicResource WarningText}" TextWrapping="Wrap" FontWeight="SemiBold" FontSize="12"/></Border>
                         <TextBlock x:Name="ConfirmLabel" Text="Type ERASE to confirm" FontWeight="SemiBold" Margin="0,0,0,7"/>
                         <TextBox x:Name="ConfirmText" Style="{StaticResource Field}" CharacterCasing="Upper" TextChanged="ConfirmText_TextChanged" Margin="0,0,0,12"/>
-                        <Button x:Name="BuildButton" Content="Build USB Queue" Click="Build_Click" Background="#AE3338" Height="50" FontSize="16" IsEnabled="False"/>
+                        <Button x:Name="BuildButton" Content="Build USB Queue" Click="Build_Click" Background="{DynamicResource ClearButtonBackground}" Foreground="{DynamicResource ClearButtonForeground}" Height="50" FontSize="16" IsEnabled="False"/>
                     </StackPanel></Border>
                 </Grid>
             </Grid>

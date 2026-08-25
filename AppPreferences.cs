@@ -4,6 +4,7 @@ public sealed class AppPreferences
 {
     public string Language { get; set; } = "en-US";
     public string Theme { get; set; } = "Light";
+    public bool ForceUnsignedDrivers { get; set; }
 }
 
 public sealed record LanguageOption(string Code, string Name)

@@ -9,7 +9,7 @@ This is an operations handoff for technicians. It does not describe how the appl
 ## Current release
 
 - Application: Laptop QA USB Drive Builder
-- Release: 1.4.52
+- Release: 2.0.22
 - Platform: Windows 10/11, 64-bit
 - Launch: Run the newest `Laptop QA USB Drive Builder vX.Y.Z.exe` from the `dist` folder
 - Permissions: Windows administrator approval is required
@@ -40,12 +40,12 @@ The default layout can be changed in Settings. A valid MBR layout must contain 1
 2. Insert the target USB drive(s). Select **Refresh** if a newly inserted drive is not listed.
 3. Select one or more USB drive cards. Assigned drive letters appear beside each disk number; multiple selections are queued and processed one at a time.
 4. Review **Partition Settings** and the **Partition Layout** preview.
-5. For each partition that needs content, use **Files** and/or **Folders**. Folder contents are merged into the root of that partition in selection order.
-6. Use **XML** if an answer file is needed. The selected file is copied to that partition's root as `Autounattend.xml`. The XML button also turns green automatically when an XML file is detected at the root of a selected folder.
-7. Use **ISO** on a fixed-size NTFS partition of at least 5 GB to create bootable 64-bit Windows installer media. The app retains and verifies the complete ISO boot set. The FAT32 `DELL DIAG` partition is diagnostics-only and is not involved in Windows boot. Bootable ISO support targets supported Dell-compatible removable USB flash sticks with native NTFS UEFI support, not fixed-media external hard disks. Only one ISO partition is supported.
+5. For each partition that needs content, select **Add**. The themed content manager remains open for multiple selections and closes with **Close**. After an ISO is selected, Drivers and Scripts become available immediately without requiring XML; script builds generate `Autounattend.xml` when none was supplied. Add and Clear are stacked vertically; green text beside them summarizes `AUXML`, `ISO`, `Folder`, `Files`, `Drivers`, and `Scripts` selections. The chooser offers files and a folder; folder contents are merged into the partition root in selection order. Hover over the control area for full paths.
+6. On NTFS, the Add chooser also offers **XML** and **ISO**. XML is copied to that partition's root as `Autounattend.xml`.
+7. Use **ISO** on a fixed-size NTFS partition of at least 5 GB and choose the edition; Windows 11 Pro is preferred. Driver selection is separate. After the ISO is valid, **Drivers** opens a themed manager where multiple recursively scanned folders and multiple individual INF packages can be accumulated, individually removed, or cleared. Drivers are added only to the installed image for OOBE; `boot.wim` is not serviced. Driver preflight checks applicable x64 INF catalogs and `[SourceDisksFiles]` payloads before ISO hashing or servicing. Missing files stop with a specific themed warning; the dialog identifies the first INF and up to 12 missing files, while the build log lists all incomplete packages. Complete packages rejected for invalid DISM data remain non-blocking and are logged. **Scripts** accepts multiple files of any type. CMD, BAT, PowerShell, VBS, JS, and WSF execute; XML and other formats are supporting files. The app merges a synchronous `specialize` command into the USB copy of a selected `Autounattend.xml`, or generates one. Recognized scripts run as `SYSTEM` before OOBE, after which all selected files and helpers are deleted. Source files remain unchanged. The FAT32 `DELL DIAG` partition is diagnostics-only. Bootable ISO support targets supported Dell-compatible removable USB flash sticks with native NTFS UEFI support, not fixed-media external hard disks. Only one ISO partition is supported.
 8. Review any capacity warning in the Partition Layout card. Warning-colored segments identify partitions whose selected content is estimated not to fit; hover to see the required and available sizes.
 9. Check the warning panel. Type `ERASE` exactly in the confirmation box.
-10. Select **Build USB Queue** and approve the final confirmation.
+10. Select **Build USB Queue**. A valid preflight proceeds directly into the queue without another confirmation.
 11. Wait for the queue to finish. Do not remove a drive or close the application while a build is active.
 12. Review the completion message. It reports successful and failed drives and gives the build-log path.
 
@@ -57,7 +57,11 @@ Each drive is rechecked immediately before it is erased, then built and verified
 
 After `Clear-Disk`, the app refreshes Windows storage state and initializes only a genuinely RAW disk. If a cleared USB stick already remains empty MBR, partition creation continues without issuing a redundant initialization command. Storage errors serialized by PowerShell as CLIXML are decoded into readable build-log messages.
 
-Selected files and folders are measured when attached and checked again during preflight. The preflight combines their sizes with validated extracted ISO contents and a filesystem safety allowance. If any partition is estimated to be too small, the build stops before the destructive confirmation or erasure.
+Selected files, folders, and Setup-script sources are measured when attached and checked again during preflight. The preflight prepares the selected Windows edition locally, optionally services it with DISM, and combines the exact cached-media size with other content and a filesystem safety allowance. If preparation fails or any partition is estimated to be too small, the build stops before erasure.
+
+Windows media is staged and cached under `%LOCALAPPDATA%\LaptopQAUsbBuilder`. Maximum-compression WIM export, one installed-image mount/commit, and queue-wide cache reuse reduce output size and repeated DISM work. Maximum compression can increase first-time export duration. A matching later build also reuses the cache. Cache identity includes the source ISO hash, edition, driver-folder manifest, and unsigned-driver choice. Remove `MediaCache` only while the app is closed when space must be reclaimed or preparation must be forced from scratch. Ensure the Windows system drive has ample free space before first-time preparation.
+
+Config includes **Allow unsigned drivers (DISM /ForceUnsigned)**, disabled by default. Enabling it only changes DISM acceptance during optional injection; Windows and Secure Boot can still reject unsigned drivers.
 
 ## What “successful” means
 
@@ -66,10 +70,10 @@ For each successful drive, the app has:
 - erased and initialized the USB target as MBR while leaving every partition inactive for UEFI-only startup;
 - created and formatted the configured partitions;
 - copied the selected files and folders;
-- copied an explicitly selected `Autounattend.xml`, prepared NTFS UEFI media, and extracted validated Windows ISO contents;
+- copied or generated `Autounattend.xml`, preserving selected answer-file settings while adding any requested pre-OOBE script runner, and prepared NTFS UEFI media containing the selected Windows edition and any requested offline drivers;
 - verified the expected partition labels and file systems.
 
-The app does not modify the source ISO. Bootable media targets supported removable USB flash sticks and 64-bit UEFI Windows Setup, not fixed-media external hard disks or legacy BIOS. It relies on the Dell firmware's native NTFS UEFI support and does not require a FAT32 boot partition. Secure Boot acceptance depends on the ISO signatures and target firmware policy.
+The app does not modify the source ISO. Bootable media targets supported removable USB flash sticks and 64-bit UEFI Windows Setup, not fixed-media external hard disks or legacy BIOS. It relies on the Dell firmware's native NTFS UEFI support and does not require a FAT32 boot partition. Secure Boot acceptance depends on the ISO and injected-driver signatures and target firmware policy.
 
 ## Troubleshooting
 
@@ -93,6 +97,10 @@ Use a larger drive or reduce the fixed-size partitions. The remaining partition 
 ### Source file or folder is missing
 
 Reconnect the source drive or correct the source path, then select the source again. Do not use a queued target drive as a source; it will be erased.
+
+### Incomplete driver package
+
+The app derives this warning from the driver sources selected for the current build; it does not use a hardcoded package list. Re-extract the original vendor package and retain every catalog and payload file referenced by the INF. The warning identifies the first affected INF and missing files found during preflight, and the build log lists every incomplete package discovered in that run.
 
 ### A queued drive fails
 

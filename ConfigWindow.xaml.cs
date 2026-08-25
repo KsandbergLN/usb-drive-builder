@@ -26,16 +26,18 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
     public List<PartitionConfig> Result { get; private set; } = [];
     public string SelectedLanguage { get; private set; }
     public string SelectedTheme { get; private set; }
+    public bool ForceUnsignedDrivers { get; private set; }
     public bool CanAddDefaultPartitions => !_defaultsLocked && _items.Count < 4;
     public bool CanRemoveDefaultPartitions => !_defaultsLocked && _items.Count > 1;
     public bool DefaultsEditable => !_defaultsLocked;
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    public ConfigWindow(IEnumerable<PartitionConfig> current, string language, string theme)
+    public ConfigWindow(IEnumerable<PartitionConfig> current, string language, string theme, bool forceUnsignedDrivers)
     {
         InitializeComponent();
         SelectedLanguage = Localization.Resolve(language).Code;
         SelectedTheme = ThemeService.Normalize(theme);
+        ForceUnsignedDrivers = forceUnsignedDrivers;
         _originalTheme = SelectedTheme;
         _items = new ObservableCollection<PartitionConfig>(current.Select(p => p.Clone()));
         PartitionGrid.ItemsSource = _items;
@@ -45,6 +47,7 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
         LanguagePicker.ItemsSource = Localization.Languages;
         LanguagePicker.SelectedItem = Localization.Resolve(SelectedLanguage);
         RebuildThemeChoices();
+        ForceUnsignedDriversCheckBox.IsChecked = ForceUnsignedDrivers;
         ApplyLanguage();
         ThemeService.Apply(this, SelectedTheme);
         Loaded += (_, _) => ThemeService.Apply(this, SelectedTheme);
@@ -222,7 +225,10 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
         PartitionGrid.IsReadOnly = _defaultsLocked;
         DefaultsLockButton.Content = _defaultsLocked ? "\uE72E" : "\uE785";
         DefaultsLockButton.ToolTip = _defaultsLocked ? "Unlock default partition editing" : "Lock default partition editing";
-        DefaultsLockButton.Background = new System.Windows.Media.SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(_defaultsLocked ? "#147A4B" : "#B36A13"));
+        DefaultsLockButton.SetResourceReference(System.Windows.Controls.Control.BackgroundProperty,
+            _defaultsLocked ? "AddButtonBackground" : "ClearButtonBackground");
+        DefaultsLockButton.SetResourceReference(System.Windows.Controls.Control.ForegroundProperty,
+            _defaultsLocked ? "AddButtonForeground" : "ClearButtonForeground");
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanAddDefaultPartitions)));
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanRemoveDefaultPartitions)));
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DefaultsEditable)));
@@ -240,6 +246,7 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
         Result = _items.Select(p => p.Clone()).ToList();
         SelectedLanguage = (LanguagePicker.SelectedItem as LanguageOption)?.Code ?? "en-US";
         SelectedTheme = (ThemePicker.SelectedItem as ThemeOption)?.Key ?? "Light";
+        ForceUnsignedDrivers = ForceUnsignedDriversCheckBox.IsChecked == true;
         DialogResult = true;
     }
 
@@ -315,7 +322,7 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
     private void ApplyLanguage()
     {
         string T(string key) => Localization.Text(SelectedLanguage, key);
-        DialogTitleText.Text = "Default Partitions"; DialogSubtitleText.Text = "Configure the layout restored by the Defaults button on the main screen.";
+        DialogTitleText.Text = "Configuration"; DialogSubtitleText.Text = "Configure default partitions and Windows image servicing.";
         LanguageLabel.Text = T("Language"); ThemeLabel.Text = T("Theme"); DefaultPartitionsLabel.Text = "Default partitions"; RemainingHint.Text = T("Remaining Hint");
         VolumeLabelColumn.Header = T("Volume label"); SizeColumn.Header = T("Size Header"); FormatColumn.Header = T("Format");
         SizeHelpText.Text = T("Size Help") + "  FAT32: 11, exFAT: 15, NTFS: 32.";
@@ -337,9 +344,25 @@ public sealed class PartitionConfig
     [JsonIgnore]
     public ObservableCollection<string> SourceFolders { get; set; } = [];
     [JsonIgnore]
+    public ObservableCollection<string> ScriptFiles { get; set; } = [];
+    [JsonIgnore]
     public string? AutounattendSource { get; set; }
     [JsonIgnore]
     public string? IsoSource { get; set; }
+    [JsonIgnore]
+    public int? IsoEditionIndex { get; set; }
+    [JsonIgnore]
+    public string? IsoEditionName { get; set; }
+    [JsonIgnore]
+    public ObservableCollection<string> DriverFolders { get; set; } = [];
+    [JsonIgnore]
+    public ObservableCollection<string> DriverFiles { get; set; } = [];
+    [JsonIgnore]
+    public bool ForceUnsignedDrivers { get; set; }
+    [JsonIgnore]
+    public string? PreparedMediaPath { get; set; }
+    [JsonIgnore]
+    public string? PreparedAutounattendXml { get; set; }
     [JsonIgnore]
     public long SelectedContentBytes { get; set; }
     [JsonIgnore]
@@ -348,13 +371,27 @@ public sealed class PartitionConfig
     public long? ExtractedIsoBytes { get; set; }
     public bool IsRemaining => SizeText.Trim() == "*";
     public string PreviewText => $"{CalculatedSizeText ?? SizeText}  |  {FileSystem}";
-    public string FilesButtonText => SourceFiles.Count == 0 ? "Files" : $"Files ({SourceFiles.Count})";
-    public string FoldersButtonText => SourceFolders.Count == 0 ? "Folders" : $"Folders ({SourceFolders.Count})";
-    public string AutounattendButtonText => "XML";
-    public string IsoButtonText => "ISO";
     public string? FolderXmlSource => SourceFolders.Select(FindRootXmlFile).FirstOrDefault(path => path is not null);
     public bool HasAutounattend => !string.IsNullOrWhiteSpace(AutounattendSource) || FolderXmlSource is not null;
     public bool HasIso => !string.IsNullOrWhiteSpace(IsoSource);
+    public bool HasScripts => ScriptFiles.Count > 0;
+    public bool HasDrivers => DriverFolders.Count + DriverFiles.Count > 0;
+    public bool HasAnyContent => SourceFiles.Count + SourceFolders.Count + ScriptFiles.Count > 0 ||
+                                 !string.IsNullOrWhiteSpace(AutounattendSource) || HasIso;
+    public string AddedContentSummary
+    {
+        get
+        {
+            var labels = new List<string>();
+            if (HasAutounattend) labels.Add("AUXML");
+            if (HasIso) labels.Add("ISO");
+            if (SourceFolders.Count > 0) labels.Add("Folder");
+            if (SourceFiles.Count > 0) labels.Add("Files");
+            if (HasDrivers) labels.Add("Drivers");
+            if (HasScripts) labels.Add("Scripts");
+            return string.Join("  •  ", labels);
+        }
+    }
     public string AutounattendToolTip => !string.IsNullOrWhiteSpace(AutounattendSource)
         ? $"Autounattend.xml selected:\n{AutounattendSource}"
         : FolderXmlSource is not null
@@ -362,22 +399,49 @@ public sealed class PartitionConfig
             : "Select Autounattend.xml for this NTFS partition, or add a folder containing an XML file.";
     public string IsoToolTip => string.IsNullOrWhiteSpace(IsoSource)
         ? "Select a Windows ISO to create bootable NTFS UEFI media."
-        : $"Bootable Windows ISO selected:\n{IsoSource}";
-    public string SourcesToolTip => SourceFiles.Count + SourceFolders.Count == 0 && string.IsNullOrWhiteSpace(AutounattendSource) && string.IsNullOrWhiteSpace(IsoSource)
+        : string.Join(Environment.NewLine,
+            $"Bootable Windows ISO selected:\n{IsoSource}",
+            string.IsNullOrWhiteSpace(IsoEditionName) ? "" : $"Edition: {IsoEditionName}",
+            HasDrivers ? $"Drivers: {DriverFolders.Count} folder(s), {DriverFiles.Count} individual INF file(s)" : "Drivers: skipped").Trim();
+    public string SourcesToolTip => !HasAnyContent
         ? "No content selected."
         : string.Join(Environment.NewLine,
             SourceFiles.Select(path => $"File: {path}")
                 .Concat(SourceFolders.Select(path => $"Folder: {path}"))
+                .Concat(ScriptFiles.Select(path => $"Setup script/support file: {path}"))
                 .Concat(string.IsNullOrWhiteSpace(AutounattendSource) ? [] : [$"Autounattend.xml: {AutounattendSource}"])
-                .Concat(string.IsNullOrWhiteSpace(IsoSource) ? [] : [$"ISO: {IsoSource}"]));
+                .Concat(string.IsNullOrWhiteSpace(IsoSource) ? [] : [$"ISO: {IsoSource}"])
+                .Concat(string.IsNullOrWhiteSpace(IsoEditionName) ? [] : [$"Windows edition: {IsoEditionName}"])
+                .Concat(DriverFolders.Select(path => $"Driver folder: {path}"))
+                .Concat(DriverFiles.Select(path => $"Driver INF: {path}")));
     public PartitionConfig Clone()
     {
         var clone = new PartitionConfig { Number = Number, Name = Name, SizeText = SizeText, FileSystem = FileSystem };
         foreach (var path in SourceFiles) clone.SourceFiles.Add(path);
         foreach (var path in SourceFolders) clone.SourceFolders.Add(path);
+        foreach (var path in ScriptFiles) clone.ScriptFiles.Add(path);
         clone.AutounattendSource = AutounattendSource;
         clone.IsoSource = IsoSource;
+        clone.IsoEditionIndex = IsoEditionIndex;
+        clone.IsoEditionName = IsoEditionName;
+        foreach (var path in DriverFolders) clone.DriverFolders.Add(path);
+        foreach (var path in DriverFiles) clone.DriverFiles.Add(path);
+        clone.ForceUnsignedDrivers = ForceUnsignedDrivers;
         return clone;
+    }
+
+    public void ClearIsoSelection()
+    {
+        IsoSource = null;
+        IsoEditionIndex = null;
+        IsoEditionName = null;
+        DriverFolders.Clear();
+        DriverFiles.Clear();
+        ForceUnsignedDrivers = false;
+        PreparedMediaPath = null;
+        PreparedAutounattendXml = null;
+        ExtractedIsoBytes = null;
+        ScriptFiles.Clear();
     }
 
     private static string? FindRootXmlFile(string folder)

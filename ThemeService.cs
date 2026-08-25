@@ -42,6 +42,10 @@ public static class ThemeService
             window.Resources["DriveText"] = Brush(text);
             window.Resources["DriveMutedText"] = Brush(muted);
             window.Resources["DriveHoverBorder"] = Brush(name == "Light" ? "#526970" : name == "AMOLED" ? "#E5E5E5" : "#D5E3E7");
+            window.Resources["AddButtonBackground"] = Brush(name == "AMOLED" ? "#0C6B3F" : "#D7F3E5");
+            window.Resources["AddButtonForeground"] = Brush(name == "AMOLED" ? "#E1FFEE" : "#147A4B");
+            window.Resources["ClearButtonBackground"] = Brush(name == "AMOLED" ? "#7A1F28" : "#D8A2A3");
+            window.Resources["ClearButtonForeground"] = Brush(name == "AMOLED" ? "#FFF0F1" : "#8E292F");
             var lightSegments = new[] { "#D8F1E5", "#DCEAF4", "#F4E8CF", "#E8DFF2", "#F2DDDC", "#D8ECEB" };
             var amoledSegments = new[] { "#0B3B25", "#0C3145", "#44340D", "#352342", "#421F22", "#073A37" };
             var segmentBorders = name == "AMOLED"

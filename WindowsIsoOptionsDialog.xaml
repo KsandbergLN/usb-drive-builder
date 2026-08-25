@@ -1,0 +1,37 @@
+<Window x:Class="LaptopQaUsbBuilder.WindowsIsoOptionsDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Windows ISO Options" Width="700" Height="390" MinWidth="620" MinHeight="360"
+        WindowStartupLocation="CenterOwner" WindowStyle="None" AllowsTransparency="True"
+        Background="Transparent" FontFamily="Segoe UI" Foreground="{DynamicResource ThemeText}">
+    <Window.Resources>
+        <SolidColorBrush x:Key="ThemeShell" Color="#F4F5F1"/><SolidColorBrush x:Key="ThemeCard" Color="#FCFDFB"/>
+        <SolidColorBrush x:Key="ThemeInput" Color="#FBFCFA"/><SolidColorBrush x:Key="ThemeText" Color="#17272D"/>
+        <SolidColorBrush x:Key="ThemeMuted" Color="#526970"/><SolidColorBrush x:Key="ThemeStroke" Color="#9BB0B7"/>
+        <SolidColorBrush x:Key="ThemeSelection" Color="#C9F1DD"/><SolidColorBrush x:Key="WarningBackground" Color="#FBE8E7"/>
+        <SolidColorBrush x:Key="WarningBorder" Color="#E6A7A8"/><SolidColorBrush x:Key="WarningText" Color="#8E292F"/>
+        <Style TargetType="Button"><Setter Property="Foreground" Value="White"/><Setter Property="Background" Value="#687F87"/><Setter Property="BorderThickness" Value="0"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Padding" Value="16,8"/><Setter Property="Cursor" Value="Hand"/><Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button"><Border Background="{TemplateBinding Background}" CornerRadius="8" Padding="{TemplateBinding Padding}"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Border></ControlTemplate></Setter.Value></Setter></Style>
+        <Style TargetType="ComboBoxItem"><Setter Property="Foreground" Value="{DynamicResource ThemeText}"/><Setter Property="Background" Value="{DynamicResource ThemeInput}"/><Setter Property="Padding" Value="9,6"/><Style.Triggers><Trigger Property="IsHighlighted" Value="True"><Setter Property="Background" Value="{DynamicResource ThemeSelection}"/></Trigger></Style.Triggers></Style>
+        <Style TargetType="ComboBox"><Setter Property="Foreground" Value="{DynamicResource ThemeText}"/><Setter Property="Background" Value="{DynamicResource ThemeInput}"/><Setter Property="BorderBrush" Value="{DynamicResource ThemeStroke}"/><Setter Property="BorderThickness" Value="1"/><Setter Property="Padding" Value="9,0"/></Style>
+        <Style TargetType="TextBox"><Setter Property="Foreground" Value="{DynamicResource ThemeText}"/><Setter Property="Background" Value="{DynamicResource ThemeInput}"/><Setter Property="BorderBrush" Value="{DynamicResource ThemeStroke}"/><Setter Property="Padding" Value="9,6"/></Style>
+    </Window.Resources>
+    <Border Background="{DynamicResource ThemeShell}" BorderBrush="{DynamicResource ThemeStroke}" BorderThickness="1" CornerRadius="24">
+        <Grid Margin="26,20">
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <Grid MouseLeftButtonDown="TitleBar_MouseLeftButtonDown"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="42"/></Grid.ColumnDefinitions>
+                <StackPanel><TextBlock Text="Windows ISO Options" FontSize="27" FontWeight="Light"/><TextBlock x:Name="IsoNameText" Foreground="{DynamicResource ThemeMuted}" TextTrimming="CharacterEllipsis"/></StackPanel>
+                <Button Grid.Column="1" Content="×" Click="Cancel_Click" Foreground="{DynamicResource ThemeText}" Background="Transparent" FontSize="20" Padding="4" VerticalAlignment="Top"/>
+            </Grid>
+            <StackPanel Grid.Row="1" Margin="0,22,0,0">
+                <TextBlock Text="Windows edition" FontWeight="SemiBold" Margin="2,0,0,5"/>
+                <ComboBox x:Name="EditionPicker" Height="40" DisplayMemberPath="DisplayName"/>
+                <TextBlock Text="Windows 11 Pro is selected automatically when present. Only the chosen edition will remain on the prepared USB media." Foreground="{DynamicResource ThemeMuted}" FontSize="11" TextWrapping="Wrap" Margin="2,5,0,0"/>
+            </StackPanel>
+            <TextBlock Grid.Row="2" Text="Choose the Windows edition here. Drivers can be added separately from the partition's Add menu. Prepared media is cached and reused across the USB queue." Foreground="{DynamicResource ThemeMuted}" TextWrapping="Wrap" VerticalAlignment="Bottom" Margin="2,14,0,0"/>
+            <Grid Grid.Row="3" Margin="0,20,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="110"/><ColumnDefinition Width="120"/></Grid.ColumnDefinitions>
+                <Button Grid.Column="1" Content="Cancel" Click="Cancel_Click" Margin="0,0,8,0"/>
+                <Button Grid.Column="2" Content="Use ISO" Click="Accept_Click" Background="{DynamicResource AddButtonBackground}" Foreground="{DynamicResource AddButtonForeground}"/>
+            </Grid>
+        </Grid>
+    </Border>
+</Window>

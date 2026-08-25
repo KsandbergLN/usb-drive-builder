@@ -2,4 +2,10 @@
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              StartupUri="MainWindow.xaml">
+    <Application.Resources>
+        <SolidColorBrush x:Key="AddButtonBackground" Color="#D7F3E5"/>
+        <SolidColorBrush x:Key="AddButtonForeground" Color="#147A4B"/>
+        <SolidColorBrush x:Key="ClearButtonBackground" Color="#D8A2A3"/>
+        <SolidColorBrush x:Key="ClearButtonForeground" Color="#8E292F"/>
+    </Application.Resources>
 </Application>

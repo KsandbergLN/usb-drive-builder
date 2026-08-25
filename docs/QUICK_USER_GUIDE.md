@@ -38,19 +38,28 @@ To change the layout, edit the partition rows on the main screen. Use **+** to a
 
 ## 4. Add content
 
-On the partition row that should receive content:
+On the partition row that should receive content, select **Add**. The themed chooser provides:
 
 - Select **Files** for individual files.
-- Select **Folders** for one or more folders.
-- Select **XML** for an answer file.
+- Select **Folder** for a folder whose contents should be merged into the partition root.
+- Select **XML** on NTFS for an answer file.
 - Select **ISO** on an NTFS partition to create bootable 64-bit UEFI Windows installation media.
-- Select **Clear** to remove all content selections for that partition.
+- After a valid ISO is selected, use **Drivers** to manage multiple driver folders and individually selected INF packages independently of ISO selection.
+- After a valid Windows ISO is selected, use **Scripts** to select one or more scripts and any supporting files they need. All file types are accepted in one multi-selection.
+
+Select **Clear** on the partition row to remove all its content selections.
+
+The theme-matched muted green Add button and muted red Clear button are stacked vertically. Add opens a content manager that stays open while you make multiple selections; choose **Close** when finished. After an ISO is selected, Drivers and Scripts appear immediately and do not require a selected XML. When scripts are present without an XML, the app generates the required `Autounattend.xml` automatically. Green summary text beside the controls shows which content types are currently attached: `AUXML`, `ISO`, `Folder`, `Files`, `Drivers`, and `Scripts`. Hover over this area to see the selected paths.
 
 Folder contents are copied into the destination partition and merged in the order selected. An answer file is renamed to `Autounattend.xml` at the partition root. The XML button also turns green automatically when an XML file is present at the root of a selected folder.
 
 After files or folders are selected, the app estimates how much partition space they require. If they will not fit, it shows a warning and highlights the affected segment in the Partition Layout card. Hover over that segment to compare its capacity with the estimated requirement.
 
-The ISO partition must be NTFS, use a fixed size of at least 5 GB, and be large enough for the ISO contents. The app copies and verifies the complete boot set. The FAT32 `DELL DIAG` partition remains diagnostics-only and is not required for Windows boot. Bootable ISO support is intended for supported Dell-compatible removable USB flash sticks with native NTFS UEFI support; fixed-media external hard disks are not supported as boot targets. Only one bootable ISO partition is supported per USB drive.
+After you select an ISO, choose the Windows edition. Windows 11 Pro is selected automatically when present. ISO selection no longer asks about drivers. Use **Drivers** afterward to open the driver manager. **Add Folder** retains previous folders and recursively adds another; **Add INF Files** allows one or more individual packages. Remove deletes the highlighted source, Clear removes all driver sources, and Save applies the list without changing the ISO. Drivers are added only to the installed Windows image so accepted packages are available during OOBE; `boot.wim` is unchanged. Before ISO preparation, the app checks applicable x64 INF entries for missing catalogs and required payload files. Incomplete packages stop before servicing and identify the INF and missing filenames; the full list is saved in the build log. Complete but DISM-invalid packages can still be skipped and logged. **Allow unsigned drivers** in Config applies DISM `/ForceUnsigned`; it does not guarantee Windows or Secure Boot acceptance.
+
+All selected files are copied into `sources\$OEM$\$$\Setup\Scripts` after the Windows media is copied. CMD, BAT, PowerShell, VBS, JS, and WSF files execute sequentially; XML and every other format are treated as supporting files that scripts can reference with `%~dp0`. The app modifies only the USB copy of a selected `Autounattend.xml`, adding a synchronous `specialize` command after any existing commands. If no XML was selected, it creates a minimal `Autounattend.xml`. Windows Setup runs the recognized scripts as `SYSTEM` before OOBE. After they finish, every selected file and the generated runner/cleanup files delete automatically. Original source files are not changed.
+
+The ISO partition must be NTFS, use a fixed size of at least 5 GB, and be large enough for the prepared contents. The app keeps only the chosen Windows edition, exports it with maximum WIM compression, prepares it on local storage, and caches the result so all queued USBs—and matching later builds—reuse the same media. Maximum compression saves USB and cache space but can make the initial preparation take longer. Cached media is stored at `%LOCALAPPDATA%\LaptopQAUsbBuilder\MediaCache` and may be deleted while the app is closed. The FAT32 `DELL DIAG` partition remains diagnostics-only and is not required for Windows boot. Bootable ISO support is intended for supported Dell-compatible removable USB flash sticks with native NTFS UEFI support; fixed-media external hard disks are not supported as boot targets. Only one bootable ISO partition is supported per USB drive.
 
 The USB itself uses MBR, with no active partition or installed legacy MBR boot program. Select its UEFI entry in the Dell boot menu; Windows Setup then installs Windows to a GPT internal system disk. Secure Boot still depends on the selected ISO's signatures and laptop firmware policy.
 
@@ -59,9 +68,8 @@ The USB itself uses MBR, with no active partition or installed legacy MBR boot p
 1. Review the drive cards, partition rows, preview, and selected sources.
 2. Type `ERASE` in the confirmation box.
 3. Select **Build USB Queue**.
-4. Read the final confirmation and select **Yes** only when the targets are correct.
 
-The app immediately shows **Preparing build** with an indeterminate progress bar while it checks the selected disks, source paths, capacity, and ISO contents. The final erase confirmation appears after these safety checks finish.
+The app immediately shows **Preparing build** with an indeterminate progress bar while it checks the selected disks, source paths, capacity, and prepares or retrieves cached Windows media. If preflight succeeds, it proceeds directly into the USB queue without another confirmation or driver-report prompt. Safety and preparation failures still stop before anything is erased.
 
 The build is blocked before erasure if the complete selected content—including extracted ISO files and other files or folders assigned to that partition—is estimated not to fit.
 
@@ -86,6 +94,8 @@ For a successful drive, safely eject it in Windows before removing it. If a driv
 | Drive too small | Use a larger drive or reduce fixed partition sizes. |
 | Source not found | Reconnect the source or choose the file/folder again. |
 | Invalid partition settings | Use sizes such as `50 MB` or `20 GB`; ensure exactly one row uses `*`. |
+| Incomplete driver package | Re-extract the original driver package and preserve every file referenced by its INF. The warning names the INF and missing files discovered during the current preflight. |
+| Driver injection fails | Confirm the folder contains extracted INF packages, ensure enough free space exists on the Windows system drive, and review the build log for the DISM error. |
 
 ## Logs
 

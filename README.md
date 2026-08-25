@@ -9,7 +9,7 @@ The app is designed for repeatable bench workflows. Technicians can save a stand
 ## Highlights
 
 - Configure 1-4 MBR partitions using FAT32, NTFS, or exFAT, including one partition that consumes all remaining space.
-- Add files and folders per partition, with `Autounattend.xml` support and bootable 64-bit UEFI Windows ISO preparation.
+- Add files and folders per partition, with `Autounattend.xml` support, Windows edition selection, and optional offline driver injection into bootable 64-bit UEFI Windows media.
 - Build multiple USB drives in sequence without one failed drive stopping the rest of the queue.
 - Preview proportional partition layouts for every selected drive before anything is erased.
 - Estimate selected content sizes, highlight partitions whose content will not fit, and block the build before erasure.
@@ -39,11 +39,23 @@ Partitions can be added with the green `+`, removed with their red `-`, and reor
 
 ## Adding content
 
-Every partition on the main screen can receive its own files and folders. Folder contents are merged into the root of the destination partition, while selected files are copied directly to that root.
+Every partition row has a muted, theme-aware green **Add** button stacked above a muted red **Clear** button with no content heading. Add opens an app-themed content manager that remains open while multiple content types are selected, automatically contracts to the visible button count, expands when ISO options become available, and closes only when **Close** is chosen. Clear removes all content assigned to that partition. Green text to their right summarizes attached types—`AUXML`, `ISO`, `Folder`, `Files`, `Drivers`, and `Scripts`—without expanding the row into separate buttons. Folder contents are merged into the destination partition root, while selected files are copied directly to that root.
 
-NTFS partitions show **XML** and **ISO** buttons. FAT32 and exFAT partitions accept regular file and folder content but do not offer ISO selection. XML selects an answer file that is copied to the partition root as `Autounattend.xml`; it turns bright green when a file is attached or when an XML file is detected at the root of a selected folder.
+Positive and destructive controls use the same theme-aware palette throughout the app. Light and Dark use the desaturated `#D7F3E5` green and `#D8A2A3` red; AMOLED uses higher-saturation equivalents with contrasting text.
 
-ISO accepts one supported 64-bit Windows installer ISO per USB drive. The destination must be a fixed-size NTFS partition of at least 5 GB. The app mounts and validates the ISO, copies its complete contents without splitting or modifying files, and verifies the boot set afterward. Windows boot does not use or require the FAT32 `DELL DIAG` partition; that volume remains available only for diagnostics. Bootable ISO support targets Dell-compatible removable USB flash sticks with native NTFS UEFI support, not fixed-media external hard disks such as WD My Passport. Select the USB's UEFI entry on the Dell boot menu so Windows Setup installs to a GPT system disk. An explicitly selected `Autounattend.xml` is copied afterward.
+For NTFS partitions, Add also offers **XML** and **ISO**. FAT32 and exFAT partitions accept regular file and folder content but do not offer ISO selection. XML selects an answer file that is copied to the partition root as `Autounattend.xml`.
+
+ISO accepts one supported 64-bit Windows installer ISO per USB drive. After inspection, an app-themed options window lists only the editions in the image and selects Windows 11 Pro by default when available. The chosen edition is exported as the only install edition, reducing later servicing and copy work.
+
+After a valid ISO is selected, the Add chooser exposes a separate **Drivers** button. It opens a themed manager that retains existing selections and can add any number of recursively scanned driver folders plus individually selected INF packages. Multiple INF files can be selected together. Entries can be removed one at a time or cleared without affecting the ISO or other content, and the Drivers button remains green while any sources are active. Before ISO hashing or servicing, the app checks each applicable x64 INF catalog and `[SourceDisksFiles]` entry. An incomplete package stops preflight with a themed **Incomplete driver package** warning that names the INF and missing files; every incomplete package is written to the build log. Complete packages with DISM-invalid or incompatible data can still be skipped and logged without a blocking prompt. The app mounts the installed image once, processes every source, and commits once; `boot.wim` is not serviced. **Allow unsigned drivers** in Config adds DISM `/ForceUnsigned`; it is off by default, and Windows or Secure Boot can still reject an unsigned driver.
+
+Preparation happens once on fast local storage before any USB is erased. The app uses DISM maximum WIM compression for the selected-edition export, mounts the installed Windows image once, commits once, and caches the result under `%LOCALAPPDATA%\LaptopQAUsbBuilder\MediaCache`. Maximum compression reduces prepared-media size but makes a first-time export slower than fast compression. Every USB in the queue reuses that prepared media, and a later build reuses it when the ISO, edition, complete driver-source manifest, and unsigned-driver setting match. Delete that cache with the app closed if local disk space must be reclaimed or a clean preparation is required.
+
+The destination must be a fixed-size NTFS partition of at least 5 GB and large enough for the prepared media. Windows boot does not use or require the FAT32 `DELL DIAG` partition; that volume remains available only for diagnostics. Bootable ISO support targets Dell-compatible removable USB flash sticks with native NTFS UEFI support, not fixed-media external hard disks such as WD My Passport. Select the USB's UEFI entry on the Dell boot menu so Windows Setup installs to a GPT system disk. An explicitly selected `Autounattend.xml` is copied afterward.
+
+Once a valid Windows ISO is selected on an NTFS partition, Add also offers **Scripts**. Its multi-select picker accepts all file types so scripts and supporting resources such as XML, JSON, configuration files, and payloads can be selected together. Everything is copied after ISO preparation into `sources\$OEM$\$$\Setup\Scripts` on the finished USB. Only CMD, BAT, PowerShell, VBS, JS, and WSF files are automatically executed; other files remain available to those scripts through `%~dp0`. Duplicate filenames are rejected, and all selected files participate in existence, target-disk, and partition-capacity safety checks.
+
+The app automatically adds a synchronous `specialize` command to the copy of `Autounattend.xml` written to the USB; the technician's source XML is never modified. If no XML was selected, the app generates a minimal answer file containing the command. During Windows Setup, the command runs recognized scripts sequentially as `SYSTEM` before OOBE. After the last script exits, a generated cleanup helper removes every selected script or support file and both generated helper files. Existing unattended settings and existing specialize commands are preserved, and the new command is placed after them.
 
 Content selections stay with their partition when the partition is reordered. Hover over the content controls to review the selected paths, or use **Clear** to remove all content selections from that partition.
 
@@ -55,7 +67,7 @@ The Activity card shows a whole-drive progress bar and the current operation. Du
 
 The drive picker shows disks that Windows reports with a USB bus type, with any assigned drive letters beside the disk number. Select one or more drive cards to create a sequential build queue. Each selected drive is revalidated immediately before it is erased, partitioned, populated, and verified. A failure on one drive is logged without preventing later queued drives from running.
 
-After **Build USB Queue** is selected, the app immediately enters a visible **Preparing build** state while it checks targets, source paths, capacity, and ISO contents. The destructive confirmation is shown only after this preflight completes.
+After **Build USB Queue** is selected, the app immediately enters a visible **Preparing build** state while it checks targets, source paths, capacity, and prepares or retrieves cached Windows media. Initial DISM preparation can take several minutes. Once `ERASE` has enabled the Build button, a valid preflight flows directly into the USB queue without another confirmation or skipped-driver prompt. A safety or preparation failure still stops before erasure and explains what must be corrected.
 
 Before building, enter `ERASE` in the confirmation field. Every partition and file on each selected target is permanently removed.
 
@@ -104,4 +116,4 @@ The publish script uses a staging directory and places the versioned executable 
 - FAT32 sizes and volume-label lengths are validated against Windows limits.
 - Copy, build, and crash logs are saved under `%LOCALAPPDATA%\LaptopQAUsbBuilder\Logs`.
 - PowerShell CLIXML errors are decoded before logging so Windows storage failures retain their useful error message. Exception stack traces retain source filenames and line numbers while removing the developer's local build path.
-- Bootable ISO preparation targets supported removable USB flash sticks with native NTFS UEFI support. It does not create FAT32 or legacy-BIOS boot media, and fixed-media external hard disks are not supported as boot targets. Secure Boot acceptance still depends on the ISO signatures and target firmware policy.
+- Bootable ISO preparation targets supported removable USB flash sticks with native NTFS UEFI support. It does not create FAT32 or legacy-BIOS boot media, and fixed-media external hard disks are not supported as boot targets. Secure Boot acceptance still depends on the ISO and injected-driver signatures and target firmware policy.

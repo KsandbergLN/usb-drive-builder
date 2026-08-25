@@ -70,35 +70,38 @@ public partial class ThemedMessageDialog : Window
         switch (buttons)
         {
             case MessageBoxButton.OK:
-                AddButton("OK", MessageBoxResult.OK, "#16844F");
+                AddButton("OK", MessageBoxResult.OK, true);
                 break;
             case MessageBoxButton.OKCancel:
-                AddButton("Cancel", MessageBoxResult.Cancel, "#687F87");
-                AddButton("OK", MessageBoxResult.OK, "#16844F");
+                AddButton("Cancel", MessageBoxResult.Cancel, false);
+                AddButton("OK", MessageBoxResult.OK, true);
                 break;
             case MessageBoxButton.YesNo:
-                AddButton("No", MessageBoxResult.No, "#687F87");
-                AddButton("Yes", MessageBoxResult.Yes, "#16844F");
+                AddButton("No", MessageBoxResult.No, false);
+                AddButton("Yes", MessageBoxResult.Yes, true);
                 break;
             case MessageBoxButton.YesNoCancel:
-                AddButton("Cancel", MessageBoxResult.Cancel, "#687F87");
-                AddButton("No", MessageBoxResult.No, "#687F87");
-                AddButton("Yes", MessageBoxResult.Yes, "#16844F");
+                AddButton("Cancel", MessageBoxResult.Cancel, false);
+                AddButton("No", MessageBoxResult.No, false);
+                AddButton("Yes", MessageBoxResult.Yes, true);
                 break;
         }
     }
 
-    private void AddButton(string text, MessageBoxResult result, string background)
+    private void AddButton(string text, MessageBoxResult result, bool positive)
     {
         var button = new System.Windows.Controls.Button
         {
             Content = text,
             Tag = result,
-            Background = new System.Windows.Media.SolidColorBrush(
-                (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(background)),
             Margin = new Thickness(ButtonPanel.Children.Count == 0 ? 0 : 8, 0, 0, 0),
             IsDefault = result == _defaultResult
         };
+        if (positive)
+        {
+            button.SetResourceReference(System.Windows.Controls.Control.BackgroundProperty, "AddButtonBackground");
+            button.SetResourceReference(System.Windows.Controls.Control.ForegroundProperty, "AddButtonForeground");
+        }
         button.Click += (_, _) => CloseWithResult(result);
         ButtonPanel.Children.Add(button);
     }
