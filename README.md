@@ -41,6 +41,8 @@ Partitions can be added with the green `+`, removed with their red `-`, and reor
 
 Every partition row has a muted, theme-aware green **Add** button stacked above a muted red **Clear** button with no content heading. Add opens an app-themed content manager that remains open while multiple content types are selected, sizes itself to the actions available for that file system, and closes only when **Close** is chosen. Clear removes all content assigned to that partition. Green text to their right summarizes attached types—`AUXML`, `ISO`, `Folder`, `Files`, `Drivers`, and `Scripts`—without expanding the row into separate buttons. Folder contents are merged into the destination partition root, while selected files are copied directly to that root.
 
+Every content-manager action changes from grey to green immediately after that content type has a successful selection. Cancelling a picker leaves its button unchanged.
+
 Positive and destructive controls use the same theme-aware palette throughout the app. Light and Dark use the desaturated `#D7F3E5` green and `#D8A2A3` red; AMOLED uses higher-saturation equivalents with contrasting text.
 
 For NTFS partitions, Add also offers **XML** and **ISO**. FAT32 and exFAT partitions accept regular file and folder content but do not offer ISO selection. XML selects an answer file that is copied to the partition root as `Autounattend.xml`.
