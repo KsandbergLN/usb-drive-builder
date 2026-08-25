@@ -9,6 +9,7 @@
         FontFamily="Segoe UI" Foreground="{DynamicResource ThemeText}"
         PreviewMouseLeftButtonDown="Window_PreviewMouseLeftButtonDown">
     <Window.Resources>
+        <local:SizeEntryValidConverter x:Key="SizeEntryValidConverter"/>
         <SolidColorBrush x:Key="Slate" Color="#687F87" />
         <SolidColorBrush x:Key="ThemeShell" Color="#F4F5F1" />
         <SolidColorBrush x:Key="ThemeCard" Color="#FCFDFB" />
@@ -55,6 +56,17 @@
             <Setter Property="BorderThickness" Value="1"/><Setter Property="FontSize" Value="14"/><Setter Property="Padding" Value="12,10"/>
             <Setter Property="VerticalContentAlignment" Value="Center"/>
         </Style>
+        <Style x:Key="SizeField" TargetType="TextBox" BasedOn="{StaticResource Field}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Text, RelativeSource={RelativeSource Self}, Converter={StaticResource SizeEntryValidConverter}}" Value="False">
+                    <Setter Property="Background" Value="{DynamicResource WarningBackground}"/>
+                    <Setter Property="Foreground" Value="{DynamicResource WarningText}"/>
+                    <Setter Property="BorderBrush" Value="{DynamicResource WarningBorder}"/>
+                    <Setter Property="BorderThickness" Value="2"/>
+                    <Setter Property="ToolTip" Value="Enter a number followed by MB or GB, or enter * for remaining space."/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
         <Style x:Key="Card" TargetType="Border">
             <Setter Property="Background" Value="{DynamicResource ThemeCard}"/><Setter Property="BorderBrush" Value="{DynamicResource ThemeStroke}"/>
             <Setter Property="BorderThickness" Value="1"/><Setter Property="CornerRadius" Value="26"/><Setter Property="Padding" Value="24,18"/>
@@ -69,9 +81,9 @@
             <Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Placement" Value="Mouse"/><Setter Property="HorizontalOffset" Value="12"/><Setter Property="VerticalOffset" Value="10"/>
             <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ToolTip">
-                <Border Background="#F8FBF9" BorderBrush="#9BB0B7" BorderThickness="1" CornerRadius="10" Padding="12,9">
+                <Border Background="{DynamicResource ThemeCard}" BorderBrush="{DynamicResource ThemeStroke}" BorderThickness="1" CornerRadius="10" Padding="12,9">
                     <Border.Effect><DropShadowEffect Color="#52666D" BlurRadius="10" ShadowDepth="3" Opacity="0.22"/></Border.Effect>
-                    <ContentPresenter TextElement.Foreground="#17272D"/>
+                    <ContentPresenter TextElement.Foreground="{DynamicResource ThemeText}"/>
                 </Border>
             </ControlTemplate></Setter.Value></Setter>
         </Style>
@@ -138,7 +150,7 @@
                             <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                 <StackPanel>
                                     <TextBlock x:Name="PartitionEditorTitle" Style="{StaticResource SectionTitle}" Text="Partition Settings" Margin="0,0,0,2"/>
-                                    <TextBlock Text="NTFS partitions support XML (Autounattend) and ISO selection. XML also turns green when detected in a selected folder." Style="{StaticResource Caption}" Margin="2,0,0,7"/>
+                                    <TextBlock Text="ISO creates NTFS Windows media for supported Dell USB sticks; FAT32 remains diagnostics-only. XML adds Autounattend.xml." Style="{StaticResource Caption}" Margin="2,0,0,7"/>
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Orientation="Horizontal">
                                     <Button x:Name="AddPartitionButton" Style="{StaticResource CircleButton}" Content="+" Click="AddPartition_Click" Width="32" Height="32" Padding="0" FontSize="18" Background="#16844F" Margin="0,0,6,0" ToolTip="Add a partition"/>
@@ -153,12 +165,12 @@
                                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="34"/><ColumnDefinition Width="1.1*"/><ColumnDefinition Width="108"/><ColumnDefinition Width="92"/><ColumnDefinition Width="2.2*"/></Grid.ColumnDefinitions>
                                         <Border Width="28" Height="28" CornerRadius="14" Background="{DynamicResource ThemeSelection}" VerticalAlignment="Center"><TextBlock Text="{Binding Number}" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
                                         <StackPanel Grid.Column="1" Margin="5,0,8,0"><TextBlock Text="Volume label" Style="{StaticResource Caption}" Margin="2,0,0,3"/><TextBox Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource Field}" Height="32" Padding="8,3" TextChanged="PartitionField_TextChanged"/></StackPanel>
-                                        <StackPanel Grid.Column="2" Margin="0,0,8,0"><TextBlock Text="Size (MB, GB, or *)" Style="{StaticResource Caption}" Margin="2,0,0,3" TextTrimming="CharacterEllipsis"/><TextBox Text="{Binding SizeText, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource Field}" Height="32" Padding="8,3" TextChanged="PartitionField_TextChanged"/></StackPanel>
+                                        <StackPanel Grid.Column="2" Margin="0,0,8,0"><TextBlock Text="Size (MB, GB, or *)" Style="{StaticResource Caption}" Margin="2,0,0,3" TextTrimming="CharacterEllipsis"/><TextBox Text="{Binding SizeText, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource SizeField}" Height="32" Padding="8,3" TextChanged="PartitionField_TextChanged"/></StackPanel>
                                         <StackPanel Grid.Column="3" Margin="0,0,8,0"><TextBlock Text="Format" Style="{StaticResource Caption}" Margin="2,0,0,3"/><ComboBox ItemsSource="{x:Static local:PartitionConfig.AllowedFormats}" SelectedItem="{Binding FileSystem, UpdateSourceTrigger=PropertyChanged}" Height="32" Foreground="{DynamicResource ThemeText}" Background="{DynamicResource ThemeInput}" BorderBrush="{DynamicResource ThemeStroke}" SelectionChanged="PartitionFormat_SelectionChanged"/></StackPanel>
                                         <StackPanel Grid.Column="4" VerticalAlignment="Bottom"><TextBlock Text="Files and folders" Style="{StaticResource Caption}" Margin="2,0,0,3"/><StackPanel Orientation="Horizontal" ToolTip="{Binding SourcesToolTip}">
                                             <Button Content="{Binding FilesButtonText}" Click="PartitionFiles_Click" Padding="9,5" Margin="0,0,5,0"/>
                                             <Button Content="{Binding FoldersButtonText}" Click="PartitionFolders_Click" Padding="9,5" Margin="0,0,5,0"/>
-                                            <Button Content="{Binding AutounattendButtonText}" Click="PartitionAutounattend_Click" Padding="9,5" Margin="0,0,5,0" ToolTip="{Binding AutounattendToolTip}"><Button.Style><Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding FileSystem}" Value="NTFS"><Setter Property="Visibility" Value="Visible"/></DataTrigger><DataTrigger Binding="{Binding HasAutounattend}" Value="True"><Setter Property="Background" Value="#20B86A"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
+                                            <Button Content="{Binding AutounattendButtonText}" Click="PartitionAutounattend_Click" Padding="9,5" Margin="0,0,5,0" ToolTip="{Binding AutounattendToolTip}"><Button.Style><Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding FileSystem}" Value="NTFS"><Setter Property="Visibility" Value="Visible"/></DataTrigger><DataTrigger Binding="{Binding HasIso}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger><DataTrigger Binding="{Binding HasAutounattend}" Value="True"><Setter Property="Background" Value="#20B86A"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
                                             <Button Content="{Binding IsoButtonText}" Click="PartitionIso_Click" Padding="9,5" Margin="0,0,5,0" ToolTip="{Binding IsoToolTip}"><Button.Style><Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding FileSystem}" Value="NTFS"><Setter Property="Visibility" Value="Visible"/></DataTrigger><DataTrigger Binding="{Binding HasIso}" Value="True"><Setter Property="Background" Value="#20B86A"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
                                             <Button Content="Clear" Click="PartitionSourcesClear_Click" Padding="8,5" ToolTip="Clear all selected content for this partition"/>
                                         </StackPanel></StackPanel>
@@ -173,16 +185,20 @@
                             <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                             <TextBlock x:Name="PartitionLayoutTitle" Style="{StaticResource SectionTitle}" Text="Partition Layout" Margin="0,0,0,5"/>
                             <Grid x:Name="PartitionPreview" Grid.Row="1" Margin="0,1" MinHeight="62"/>
-                            <TextBlock x:Name="PartitionLayoutNote" Grid.Row="2" Text="Each selected disk will use a GPT partition table." Style="{StaticResource Caption}" Margin="2,3,0,0"/>
+                            <TextBlock x:Name="PartitionLayoutNote" Grid.Row="2" Text="Each selected disk will use an MBR partition table and UEFI-only Windows boot media." Style="{StaticResource Caption}" Margin="2,3,0,0"/>
                         </Grid></Border>
                 </Grid>
 
                 <Grid Grid.Column="2"><Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                     <Border Grid.Row="0" Style="{StaticResource Card}" Margin="0,0,0,14"><Grid>
-                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                         <TextBlock x:Name="ActivityTitle" Style="{StaticResource SectionTitle}" Text="Activity"/>
                         <ListBox x:Name="ActivityList" Grid.Row="1" BorderThickness="0" Background="Transparent" FontSize="13" Foreground="{DynamicResource ThemeMuted}" ScrollViewer.VerticalScrollBarVisibility="Auto"/>
                         <ProgressBar x:Name="BuildProgress" Grid.Row="2" Height="8" Margin="0,10,0,0" Foreground="#20B86A" Background="#D9E2DF" Minimum="0" Maximum="100" Value="0"/>
+                        <StackPanel Grid.Row="3" Margin="0,6,0,0">
+                            <TextBlock x:Name="CurrentEtaText" Text="Current activity: Waiting" Foreground="{DynamicResource ThemeMuted}" FontSize="11"/>
+                            <TextBlock x:Name="QueueEtaText" Visibility="Collapsed"/>
+                        </StackPanel>
                     </Grid></Border>
                     <Border Grid.Row="1" Style="{StaticResource Card}" Margin="0"><StackPanel>
                         <Border Background="{DynamicResource WarningBackground}" BorderBrush="{DynamicResource WarningBorder}" BorderThickness="1" CornerRadius="12" Padding="10,8" Margin="0,0,0,14"><TextBlock x:Name="WarningText" Text="WARNING: Every partition and file on the selected USB drives will be permanently erased." Foreground="{DynamicResource WarningText}" TextWrapping="Wrap" FontWeight="SemiBold" FontSize="12"/></Border>

@@ -1,10 +1,13 @@
 using Microsoft.Win32;
+using System.Buffers;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
+using System.Net;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -15,8 +18,10 @@ namespace LaptopQaUsbBuilder;
 
 public partial class MainWindow : Window
 {
+    public string CurrentTheme => _preferences.Theme;
     private readonly JsonSerializerOptions _jsonOptions = new() { PropertyNameCaseInsensitive = true };
     private bool _isBuilding;
+    private bool _isPreflighting;
     private bool _updatingPartitionGrid;
     private PartitionConfig? _draggedPartition;
     private Point _partitionDragStart;
@@ -27,7 +32,26 @@ public partial class MainWindow : Window
     private List<PartitionConfig> _partitions = [];
     private List<PartitionConfig> _defaultPartitions = [];
     private AppPreferences _preferences = new();
-    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.4.36"}";
+    private readonly object _etaSync = new();
+    private long _activityBytesTotal;
+    private long _activityBytesCopied;
+    private long _activitySampleBytes;
+    private long _queueBytesTotal;
+    private long _queueBytesCopied;
+    private long _queueSampleBytes;
+    private long _queueBytesPerDrive;
+    private long _queueDiskStartBytes;
+    private DateTime _activityStartedUtc;
+    private DateTime _activitySampleUtc;
+    private DateTime _queueStartedUtc;
+    private DateTime _queueSampleUtc;
+    private DateTime _lastEtaUiUpdateUtc;
+    private double _activityBytesPerSecond;
+    private double _queueBytesPerSecond;
+    private double _activityProgressStart;
+    private double _activityProgressEnd;
+    private string _activityName = "Transfer";
+    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.4.52"}";
     private const string MainPartitionDragFormat = "LaptopQaUsbBuilder.MainPartition";
 
     public MainWindow()
@@ -49,9 +73,10 @@ public partial class MainWindow : Window
         };
         Closing += (_, e) =>
         {
-            if (!_isBuilding) return;
+            if (!_isBuilding && !_isPreflighting) return;
             e.Cancel = true;
-            MessageBox.Show("Wait for the active USB build to finish before closing.", "Build in progress", MessageBoxButton.OK, MessageBoxImage.Information);
+            MessageBox.Show(_isPreflighting ? "Wait for the build safety checks to finish before closing." : "Wait for the active USB build to finish before closing.",
+                _isPreflighting ? "Preparing build" : "Build in progress", MessageBoxButton.OK, MessageBoxImage.Information);
         };
     }
 
@@ -61,7 +86,7 @@ public partial class MainWindow : Window
         {
             RefreshButton.IsEnabled = false;
             FooterText.Text = $"Administrator mode  |  {VersionLabel}  |  Scanning for USB disks";
-            var script = "$ProgressPreference='SilentlyContinue'; ConvertTo-Json -InputObject @(Get-Disk | Where-Object BusType -eq 'USB' | Where-Object OperationalStatus -ne 'Offline' | Sort-Object Number | Select-Object Number,FriendlyName,SerialNumber,UniqueId,Size,IsBoot,IsSystem) -Compress";
+            var script = "$ProgressPreference='SilentlyContinue';$items=@(Get-Disk|Where-Object BusType -eq 'USB'|Where-Object OperationalStatus -ne 'Offline'|Sort-Object Number|ForEach-Object{$d=$_;$letters=@(Get-Partition -DiskNumber $d.Number -ErrorAction SilentlyContinue|Get-Volume -ErrorAction SilentlyContinue|Where-Object DriveLetter|Sort-Object DriveLetter|ForEach-Object{[string]$_.DriveLetter+':'});[pscustomobject]@{Number=$d.Number;FriendlyName=$d.FriendlyName;SerialNumber=$d.SerialNumber;UniqueId=$d.UniqueId;Size=$d.Size;IsBoot=$d.IsBoot;IsSystem=$d.IsSystem;DriveLetters=($letters -join ', ')}});ConvertTo-Json -InputObject $items -Compress";
             var json = await RunPowerShellAsync(script);
             var disks = DeserializeUsbDisks(json);
             DiskPicker.ItemsSource = disks;
@@ -89,6 +114,15 @@ public partial class MainWindow : Window
 
     private async void Build_Click(object sender, RoutedEventArgs e)
     {
+        if (_isBuilding || _isPreflighting) return;
+        SetPreflightState(true);
+        await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.Render);
+        try { await BuildCoreAsync(); }
+        finally { SetPreflightState(false); }
+    }
+
+    private async Task BuildCoreAsync()
+    {
         var queuedDisks = SelectedDisks();
         if (queuedDisks.Count == 0) return;
         if (!ValidatePartitionLayout(out var layoutError))
@@ -102,6 +136,13 @@ public partial class MainWindow : Window
         {
             MessageBox.Show($"These drives are too small for the configured layout (minimum {FormatBytes(requiredSize)}):\n\n{string.Join("\n", tooSmall.Select(d => $"Disk {d.Number} - {d.FriendlyName} ({FormatBytes(d.Size)})"))}",
                 "Drive too small", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        var tooLargeForMbr = queuedDisks.Where(d => d.Size > 2L * 1024 * 1024 * 1024 * 1024).ToList();
+        if (tooLargeForMbr.Count > 0)
+        {
+            MessageBox.Show($"MBR cannot address all space on these drives:\n\n{string.Join("\n", tooLargeForMbr.Select(d => $"Disk {d.Number} - {d.FriendlyName} ({FormatBytes(d.Size)})"))}",
+                "Drive exceeds MBR limit", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
         var fixedSize = _partitions.Where(p => !p.IsRemaining).Sum(p => PartitionConfig.TryParseSize(p.SizeText, out var bytes) ? bytes : 0);
@@ -152,10 +193,52 @@ public partial class MainWindow : Window
                 }
         }
 
+        await RefreshAllPartitionContentSizesAsync();
+
+        foreach (var partition in _partitions.Where(p => p.HasIso))
+        {
+            if (partition.FileSystem != "NTFS" || partition.IsRemaining || !PartitionConfig.TryParseSize(partition.SizeText, out var partitionBytes))
+            {
+                MessageBox.Show($"{partition.Name} must be a fixed-size NTFS partition to create bootable Windows media.",
+                    "Invalid boot partition", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            try
+            {
+                SetStatus("Validating ISO", "#B36A13");
+                var isoInfo = await InspectBootableIsoAsync(partition.IsoSource!);
+                partition.ExtractedIsoBytes = isoInfo.TotalBytes;
+                var requiredCapacity = EstimateRequiredPartitionCapacity(partition);
+                if (requiredCapacity > partitionBytes)
+                    throw new InvalidOperationException($"The ISO and other selected content need approximately {FormatBytes(requiredCapacity)}, but {partition.Name} is only {FormatBytes(partitionBytes)}.");
+            }
+            catch (Exception ex)
+            {
+                SetStatus(Localization.Text(_preferences.Language, "Ready"), "#147A4B");
+                MessageBox.Show($"The selected ISO cannot be prepared as bootable Windows media.\n\n{ex.Message}",
+                    "ISO validation failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+        }
+        UpdatePartitionPreview(queuedDisks);
+        var capacityWarnings = GetContentCapacityWarnings(queuedDisks);
+        SetStatus(Localization.Text(_preferences.Language, "Ready"), "#147A4B");
+        if (capacityWarnings.Count > 0)
+        {
+            MessageBox.Show($"Selected files and folders will not fit in the configured partition space:\n\n{string.Join("\n", capacityWarnings)}\n\nIncrease the affected partition size or remove content before building.",
+                "Partition content will not fit", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
         var queueSummary = string.Join("\n", queuedDisks.Select(d => $"Disk {d.Number} - {d.FriendlyName} - {FormatBytes(d.Size)}"));
+        SetPreflightState(false);
+        SetStatus("Awaiting confirmation", "#B36A13");
         var answer = MessageBox.Show($"Permanently erase and build these {queuedDisks.Count} USB drive(s) sequentially?\n\n{queueSummary}\n\nThis cannot be undone.",
             "Final confirmation", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No);
-        if (answer != MessageBoxResult.Yes) return;
+        if (answer != MessageBoxResult.Yes)
+        {
+            SetStatus(Localization.Text(_preferences.Language, "Ready"), "#147A4B");
+            return;
+        }
 
         var logFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LaptopQAUsbBuilder", "Logs");
         Directory.CreateDirectory(logFolder);
@@ -163,6 +246,9 @@ public partial class MainWindow : Window
         ActivityList.Items.Clear();
         SetBuildingState(true);
         SetStatus("Building", "#B36A13");
+        CurrentEtaText.Text = "Current activity: Preparing drive...";
+        QueueEtaText.Visibility = Visibility.Collapsed;
+        InitializeEtaTracking(0, queuedDisks.Count);
         BuildProgress.IsIndeterminate = true;
 
         var succeeded = 0;
@@ -170,8 +256,10 @@ public partial class MainWindow : Window
         for (var queueIndex = 0; queueIndex < queuedDisks.Count; queueIndex++)
         {
             var disk = queuedDisks[queueIndex];
+            StartQueueDiskEstimate();
             SetStatus($"Building {queueIndex + 1} of {queuedDisks.Count}", "#B36A13");
             BuildProgress.IsIndeterminate = true;
+            SetNonTransferActivity("Preparing drive...");
             try
             {
                 AddActivity($"QUEUE {queueIndex + 1}/{queuedDisks.Count}: Locked target to Disk {disk.Number}: {disk.FriendlyName}.");
@@ -195,20 +283,24 @@ public partial class MainWindow : Window
                 }
                 if (copyPartitions.Count == 0) BuildProgress.Value = 95;
                 AddActivity("Verifying partition labels and file systems.");
+                SetNonTransferActivity("Verifying partitions...");
                 await VerifyPartitionsAsync(disk.Number, disk.UniqueId);
                 BuildProgress.Value = 100;
                 succeeded++;
+                CompleteQueueDiskEstimate();
                 AddActivity($"Disk {disk.Number} completed and verified.");
                 Log($"Disk {disk.Number} completed and verified.");
             }
             catch (Exception ex)
             {
+                CompleteQueueDiskEstimate();
                 failures.Add($"Disk {disk.Number}: {ex.Message}");
                 AddActivity($"Disk {disk.Number} FAILED: {ex.Message}. Continuing queue.");
-                Log($"Disk {disk.Number} ERROR: {ex}");
+                Log($"Disk {disk.Number} ERROR: {LogSanitizer.SanitizeException(ex)}");
             }
         }
         BuildProgress.IsIndeterminate = false;
+        CompleteEtaTracking();
         SetBuildingState(false);
         ConfirmText.Clear();
         SetStatus(failures.Count == 0 ? "Complete" : "Queue finished", failures.Count == 0 ? "#147A4B" : "#AE3338");
@@ -230,7 +322,10 @@ public partial class MainWindow : Window
         script.AppendLine($"if($d.IsReadOnly){{Set-Disk -Number {disk.Number} -IsReadOnly $false}}");
         script.AppendLine($"if($d.IsOffline){{Set-Disk -Number {disk.Number} -IsOffline $false}}");
         script.AppendLine($"if($d.PartitionStyle -ne 'RAW'){{Clear-Disk -Number {disk.Number} -RemoveData -RemoveOEM -Confirm:$false}}");
-        script.AppendLine($"Initialize-Disk -Number {disk.Number} -PartitionStyle GPT | Out-Null");
+        script.AppendLine("for($i=0;$i -lt 20;$i++){Update-HostStorageCache -ErrorAction SilentlyContinue;$d=Get-Disk -Number " + disk.Number + ";$partitionCount=@(Get-Partition -DiskNumber " + disk.Number + " -ErrorAction SilentlyContinue).Count;if($d.PartitionStyle -eq 'RAW' -or ($d.PartitionStyle -eq 'MBR' -and $partitionCount -eq 0)){break};Start-Sleep -Milliseconds 250}");
+        script.AppendLine($"$d=Get-Disk -Number {disk.Number};$partitionCount=@(Get-Partition -DiskNumber {disk.Number} -ErrorAction SilentlyContinue).Count");
+        script.AppendLine($"if($d.PartitionStyle -eq 'RAW'){{Initialize-Disk -Number {disk.Number} -PartitionStyle MBR | Out-Null}}elseif($d.PartitionStyle -eq 'MBR' -and $partitionCount -eq 0){{}}elseif($d.PartitionStyle -eq 'GPT'){{throw 'Windows did not clear the GPT partition table. Disconnect and reconnect the USB stick, then retry.'}}else{{throw \"The cleared USB disk is in an unexpected state: $($d.PartitionStyle) with $partitionCount partition(s).\"}}");
+        script.AppendLine($"Update-HostStorageCache -ErrorAction SilentlyContinue;$d=Get-Disk -Number {disk.Number};if($d.PartitionStyle -ne 'MBR'){{throw \"The USB disk could not be prepared as MBR. Windows reports $($d.PartitionStyle).\"}}");
 
         for (var index = 0; index < _partitions.Count; index++)
         {
@@ -254,10 +349,13 @@ public partial class MainWindow : Window
                     ? $"-Size {sizeBytes}"
                     : throw new InvalidOperationException($"Invalid size for partition {index + 1}.");
             }
-            script.AppendLine($"${variable}=New-Partition -DiskNumber {disk.Number} {sizeArgument} -AssignDriveLetter");
+            var mbrType = item.FileSystem == "FAT32" ? " -MbrType FAT32" : " -MbrType IFS";
+            script.AppendLine($"${variable}=New-Partition -DiskNumber {disk.Number} {sizeArgument} -AssignDriveLetter{mbrType}");
             var allocation = item.FileSystem == "NTFS" ? " -AllocationUnitSize 4096" : "";
             script.AppendLine($"${variable} | Format-Volume -FileSystem {item.FileSystem} -NewFileSystemLabel '{PsQuote(item.Name)}'{allocation} -Confirm:$false -Force | Out-Null");
         }
+
+        script.AppendLine($"Get-Partition -DiskNumber {disk.Number}|Where-Object IsActive|Set-Partition -IsActive $false");
 
         var letterExpressions = string.Join(",", Enumerable.Range(1, _partitions.Count).Select(number => $"[string](($p{number}|Get-Volume).DriveLetter)"));
         script.AppendLine($"[pscustomobject]@{{Letters=@({letterExpressions})}} | ConvertTo-Json -Compress");
@@ -274,6 +372,8 @@ public partial class MainWindow : Window
         script.AppendLine("$ErrorActionPreference='Stop'");
         script.AppendLine($"$d=Get-Disk -Number {diskNumber}");
         script.AppendLine($"if($d.BusType -ne 'USB' -or ('{id}' -and [string]$d.UniqueId -ne '{id}')){{throw 'Target USB identity changed during verification.'}}");
+        script.AppendLine("if($d.PartitionStyle -ne 'MBR'){throw 'Verification found that the USB disk is not MBR.'}");
+        script.AppendLine($"if(Get-Partition -DiskNumber {diskNumber}|Where-Object IsActive){{throw 'A legacy-active partition was found; the installer would not be UEFI-only.'}}");
         script.AppendLine($"$v=@(Get-Partition -DiskNumber {diskNumber} | Get-Volume | Where-Object FileSystemLabel)");
         script.AppendLine($"$expected=@({expected})");
         script.AppendLine($"if($v.Count -ne {_partitions.Count}){{throw 'Verification found an unexpected number of formatted partitions.'}}");
@@ -304,18 +404,16 @@ public partial class MainWindow : Window
     {
         var sources = partition.SourceFolders.Select(path => (Path: path, IsFolder: true, TargetName: (string?)null))
             .Concat(partition.SourceFiles.Select(path => (Path: path, IsFolder: false, TargetName: (string?)Path.GetFileName(path))))
-            .Concat(partition.FileSystem == "NTFS" && !string.IsNullOrWhiteSpace(partition.AutounattendSource)
-                ? [(Path: partition.AutounattendSource!, IsFolder: false, TargetName: (string?)"Autounattend.xml")]
-                : [])
-            .Concat(partition.FileSystem == "NTFS" && !string.IsNullOrWhiteSpace(partition.IsoSource)
-                ? [(Path: partition.IsoSource!, IsFolder: false, TargetName: (string?)Path.GetFileName(partition.IsoSource))]
-                : []).ToList();
-        if (sources.Count == 0) { BuildProgress.Value = endProgress; return; }
+            .ToList();
+        var hasIso = partition.FileSystem == "NTFS" && !string.IsNullOrWhiteSpace(partition.IsoSource);
+        var hasAutounattend = (partition.FileSystem == "NTFS" || hasIso) && !string.IsNullOrWhiteSpace(partition.AutounattendSource);
+        var operationCount = sources.Count + (hasIso ? 1 : 0) + (hasAutounattend ? 1 : 0);
+        if (operationCount == 0) { BuildProgress.Value = endProgress; return; }
 
         for (var index = 0; index < sources.Count; index++)
         {
-            var sourceStart = startProgress + (endProgress - startProgress) * index / sources.Count;
-            var sourceEnd = startProgress + (endProgress - startProgress) * (index + 1) / sources.Count;
+            var sourceStart = startProgress + (endProgress - startProgress) * index / operationCount;
+            var sourceEnd = startProgress + (endProgress - startProgress) * (index + 1) / operationCount;
             var source = sources[index];
             if (source.IsFolder)
             {
@@ -323,89 +421,536 @@ public partial class MainWindow : Window
             }
             else
             {
-                BuildProgress.Value = sourceStart;
                 var target = Path.Combine(destination, source.TargetName ?? Path.GetFileName(source.Path));
                 AddActivity($"Copying file {source.TargetName ?? Path.GetFileName(source.Path)} to {partition.Name}.");
                 Log($"Copying {source.Path} to {target}");
-                await Task.Run(() => File.Copy(source.Path, target, true));
-                BuildProgress.Value = sourceEnd;
+                await CopyFileWithProgressAsync(source.Path, target, Path.GetFileName(source.Path), sourceStart, sourceEnd);
             }
+        }
+
+        var operationIndex = sources.Count;
+        if (hasIso)
+        {
+            var isoStart = startProgress + (endProgress - startProgress) * operationIndex / operationCount;
+            var isoEnd = startProgress + (endProgress - startProgress) * ++operationIndex / operationCount;
+            await ExtractIsoContentsAsync(partition.IsoSource!, destination, partition.Name, isoStart, isoEnd);
+        }
+
+        if (hasAutounattend)
+        {
+            var xmlStart = startProgress + (endProgress - startProgress) * operationIndex / operationCount;
+            var target = Path.Combine(destination, "Autounattend.xml");
+            AddActivity($"Copying Autounattend.xml to {partition.Name}.");
+            Log($"Copying {partition.AutounattendSource} to {target}");
+            await CopyFileWithProgressAsync(partition.AutounattendSource!, target, "Autounattend.xml", xmlStart, endProgress);
         }
         AddActivity($"Selected content copied to {partition.Name}.");
     }
 
-    private async Task CopySourceAsync(string source, string destination, string name, int startProgress, int endProgress)
+    private async Task ExtractIsoContentsAsync(string isoPath, string destination, string partitionName, int startProgress, int endProgress)
+    {
+        BuildProgress.Value = startProgress;
+        SetNonTransferActivity("Mounting ISO...");
+        AddActivity($"Mounting {Path.GetFileName(isoPath)} for {partitionName}.");
+        Log($"Mounting ISO {isoPath}");
+        var driveLetter = await MountIsoAsync(isoPath);
+
+        try
+        {
+            var sourceRoot = $"{driveLetter}:\\";
+            InspectMountedWindowsIso(sourceRoot);
+            AddActivity($"Extracting {Path.GetFileName(isoPath)} into {partitionName}.");
+            await CopySourceAsync(sourceRoot, destination, $"{partitionName} ISO", startProgress, endProgress);
+
+            if (!File.Exists(Path.Combine(destination, "efi", "boot", "bootx64.efi")) ||
+                !File.Exists(Path.Combine(destination, "sources", "boot.wim")) ||
+                !File.Exists(Path.Combine(destination, "bootmgr")) ||
+                !File.Exists(Path.Combine(destination, "boot", "bcd")) ||
+                !File.Exists(Path.Combine(destination, "efi", "microsoft", "boot", "bcd")))
+                throw new InvalidOperationException("Boot-file verification failed after extracting the Windows ISO.");
+            AddActivity($"Complete ISO boot set verified on {partitionName}.");
+            AddActivity($"{partitionName} is prepared as NTFS Windows media for supported Dell USB sticks.");
+        }
+        finally
+        {
+            try
+            {
+                await DismountIsoAsync(isoPath);
+                Log($"Dismounted ISO {isoPath}");
+            }
+            catch (Exception ex)
+            {
+                AddActivity($"Warning: Windows could not dismount {Path.GetFileName(isoPath)} automatically.");
+                Log($"ISO dismount warning for {isoPath}: {LogSanitizer.SanitizeException(ex)}");
+            }
+        }
+    }
+
+    private async Task<BootableIsoInfo> InspectBootableIsoAsync(string isoPath)
+    {
+        var driveLetter = await MountIsoAsync(isoPath);
+        try { return InspectMountedWindowsIso($"{driveLetter}:\\"); }
+        finally { await DismountIsoAsync(isoPath); }
+    }
+
+    private static BootableIsoInfo InspectMountedWindowsIso(string root)
+    {
+        var bootFile = Path.Combine(root, "efi", "boot", "bootx64.efi");
+        var bootWim = Path.Combine(root, "sources", "boot.wim");
+        var bootManager = Path.Combine(root, "bootmgr");
+        var biosBcd = Path.Combine(root, "boot", "bcd");
+        var uefiBcd = Path.Combine(root, "efi", "microsoft", "boot", "bcd");
+        var installWim = Path.Combine(root, "sources", "install.wim");
+        var installEsd = Path.Combine(root, "sources", "install.esd");
+        if (!File.Exists(bootFile) || !File.Exists(bootWim) || !File.Exists(bootManager) || !File.Exists(biosBcd) || !File.Exists(uefiBcd))
+            throw new InvalidOperationException("This is not a complete supported 64-bit Windows installer ISO. One or more required EFI, boot manager, BCD, or boot.wim files are missing.");
+        if (!File.Exists(installWim) && !File.Exists(installEsd))
+            throw new InvalidOperationException("Windows Setup image sources\\install.wim or sources\\install.esd was not found.");
+
+        return new BootableIsoInfo(CalculateDirectoryBytes(root));
+    }
+
+    private static async Task<string> MountIsoAsync(string isoPath)
+    {
+        var escapedPath = PsQuote(isoPath);
+        var mountScript = $"$path='{escapedPath}';$existing=Get-DiskImage -ImagePath $path -ErrorAction SilentlyContinue;if($existing -and $existing.Attached){{throw 'The selected ISO is already mounted. Dismount it in Windows before building.'}};try{{Mount-DiskImage -ImagePath $path -PassThru -ErrorAction Stop|Out-Null;$v=$null;for($i=0;$i -lt 20 -and -not $v;$i++){{Start-Sleep -Milliseconds 250;$v=Get-DiskImage -ImagePath $path|Get-Volume -ErrorAction SilentlyContinue|Where-Object DriveLetter|Select-Object -First 1}};if(-not $v){{throw 'Windows mounted the ISO but did not assign it a drive letter.'}};$v.DriveLetter}}catch{{Dismount-DiskImage -ImagePath $path -ErrorAction SilentlyContinue;throw}}";
+        var driveLetter = (await RunPowerShellAsync(mountScript)).Trim().TrimEnd(':');
+        if (driveLetter.Length != 1 || !char.IsLetter(driveLetter[0]))
+        {
+            await DismountIsoAsync(isoPath);
+            throw new InvalidOperationException("Windows mounted the ISO but returned an invalid drive letter.");
+        }
+        return driveLetter;
+    }
+
+    private static Task DismountIsoAsync(string isoPath) =>
+        RunPowerShellAsync($"Dismount-DiskImage -ImagePath '{PsQuote(isoPath)}' -ErrorAction Stop");
+
+    private async Task CopySourceAsync(string source, string destination, string name, int startProgress, int endProgress, string? excludedFile = null)
     {
         BuildProgress.Value = startProgress;
         AddActivity($"Copying {name} content from {source}.");
         Log($"Copying {source} to {destination}");
-        await Task.Run(() =>
+        CurrentEtaText.Text = $"Current activity: Scanning {name}...";
+        var totalBytes = await Task.Run(() => CalculateDirectoryBytes(source, excludedFile));
+        BeginTransferActivity(name, totalBytes, startProgress, endProgress);
+        try
         {
-            var directories = new Stack<(string Source, string Target)>();
-            directories.Push((source, destination));
-            var filesCopied = 0;
-            while (directories.Count > 0)
+            await Task.Run(() =>
             {
-                var current = directories.Pop();
-                Directory.CreateDirectory(current.Target);
-                string[] files;
-                string[] childDirectories;
-                try
+                var directories = new Stack<(string Source, string Target)>();
+                directories.Push((source, destination));
+                while (directories.Count > 0)
                 {
-                    files = Directory.GetFiles(current.Source);
-                    childDirectories = Directory.GetDirectories(current.Source);
-                }
-                catch (UnauthorizedAccessException)
-                {
-                    Dispatcher.Invoke(() => AddActivity($"Skipped protected folder: {current.Source}"));
-                    continue;
-                }
-                catch (IOException ex)
-                {
-                    Dispatcher.Invoke(() => AddActivity($"Skipped unreadable folder: {current.Source} ({ex.Message})"));
-                    continue;
-                }
-
-                foreach (var file in files)
-                {
-                    File.Copy(file, Path.Combine(current.Target, Path.GetFileName(file)), true);
-                    filesCopied++;
-                    if (filesCopied % 20 == 0)
-                    {
-                        Dispatcher.Invoke(() => BuildProgress.Value = Math.Min(endProgress - 1, BuildProgress.Value + 1));
-                    }
-                }
-                foreach (var folder in childDirectories)
-                {
-                    var folderName = Path.GetFileName(folder);
-                    if (folderName.Equals("System Volume Information", StringComparison.OrdinalIgnoreCase) ||
-                        folderName.Equals("$RECYCLE.BIN", StringComparison.OrdinalIgnoreCase))
-                    {
-                        Dispatcher.Invoke(() => AddActivity($"Skipped Windows metadata folder: {folderName}"));
-                        continue;
-                    }
-
+                    var current = directories.Pop();
+                    Directory.CreateDirectory(current.Target);
+                    string[] files;
+                    string[] childDirectories;
                     try
                     {
-                        var attributes = File.GetAttributes(folder);
-                        if ((attributes & FileAttributes.ReparsePoint) != 0)
-                        {
-                            Dispatcher.Invoke(() => AddActivity($"Skipped linked folder: {folder}"));
-                            continue;
-                        }
+                        files = Directory.GetFiles(current.Source);
+                        childDirectories = Directory.GetDirectories(current.Source);
                     }
                     catch (UnauthorizedAccessException)
                     {
-                        Dispatcher.Invoke(() => AddActivity($"Skipped protected folder: {folder}"));
+                        Dispatcher.Invoke(() => AddActivity($"Skipped protected folder: {current.Source}"));
                         continue;
                     }
-                    directories.Push((folder, Path.Combine(current.Target, Path.GetFileName(folder))));
+                    catch (IOException ex)
+                    {
+                        Dispatcher.Invoke(() => AddActivity($"Skipped unreadable folder: {current.Source} ({ex.Message})"));
+                        continue;
+                    }
+
+                    foreach (var file in files)
+                    {
+                        if (excludedFile is not null && file.Equals(excludedFile, StringComparison.OrdinalIgnoreCase)) continue;
+                        CopyFileWithProgress(file, Path.Combine(current.Target, Path.GetFileName(file)));
+                    }
+                    foreach (var folder in childDirectories)
+                    {
+                        var folderName = Path.GetFileName(folder);
+                        if (folderName.Equals("System Volume Information", StringComparison.OrdinalIgnoreCase) ||
+                            folderName.Equals("$RECYCLE.BIN", StringComparison.OrdinalIgnoreCase))
+                        {
+                            Dispatcher.Invoke(() => AddActivity($"Skipped Windows metadata folder: {folderName}"));
+                            continue;
+                        }
+
+                        try
+                        {
+                            var attributes = File.GetAttributes(folder);
+                            if ((attributes & FileAttributes.ReparsePoint) != 0)
+                            {
+                                Dispatcher.Invoke(() => AddActivity($"Skipped linked folder: {folder}"));
+                                continue;
+                            }
+                        }
+                        catch (UnauthorizedAccessException)
+                        {
+                            Dispatcher.Invoke(() => AddActivity($"Skipped protected folder: {folder}"));
+                            continue;
+                        }
+                        directories.Push((folder, Path.Combine(current.Target, Path.GetFileName(folder))));
+                    }
                 }
-            }
-            Dispatcher.Invoke(() => BuildProgress.Value = endProgress);
-        });
+            });
+            BuildProgress.Value = endProgress;
+        }
+        finally
+        {
+            EndTransferActivity();
+        }
         AddActivity($"{name} content copied successfully.");
     }
+
+    private async Task CopyFileWithProgressAsync(string source, string destination, string name, double startProgress, double endProgress)
+    {
+        var totalBytes = GetFileLength(source);
+        BeginTransferActivity(name, totalBytes, startProgress, endProgress);
+        try
+        {
+            await Task.Run(() => CopyFileWithProgress(source, destination));
+            BuildProgress.Value = endProgress;
+        }
+        finally
+        {
+            EndTransferActivity();
+        }
+    }
+
+    private void CopyFileWithProgress(string source, string destination)
+    {
+        const int bufferSize = 256 * 1024;
+        {
+            using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize, FileOptions.SequentialScan);
+            using var output = new FileStream(destination, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize, FileOptions.SequentialScan);
+            var buffer = ArrayPool<byte>.Shared.Rent(bufferSize);
+            try
+            {
+                int bytesRead;
+                while ((bytesRead = input.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    output.Write(buffer, 0, bytesRead);
+                    ReportTransferBytes(bytesRead);
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
+        try { File.SetLastWriteTimeUtc(destination, File.GetLastWriteTimeUtc(source)); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    private static long CalculateDirectoryBytes(string source, string? excludedFile = null)
+        => CalculateDirectoryStats(source, excludedFile).TotalBytes;
+
+    private static (long TotalBytes, long LargestFileBytes) CalculateDirectoryStats(string source, string? excludedFile = null)
+    {
+        long total = 0;
+        long largest = 0;
+        var directories = new Stack<string>();
+        directories.Push(source);
+        while (directories.Count > 0)
+        {
+            var current = directories.Pop();
+            try
+            {
+                foreach (var file in Directory.EnumerateFiles(current))
+                {
+                    if (excludedFile is not null && file.Equals(excludedFile, StringComparison.OrdinalIgnoreCase)) continue;
+                    var length = GetFileLength(file);
+                    total = SaturatingAdd(total, length);
+                    largest = Math.Max(largest, length);
+                }
+                foreach (var folder in Directory.EnumerateDirectories(current))
+                {
+                    var name = Path.GetFileName(folder);
+                    if (name.Equals("System Volume Information", StringComparison.OrdinalIgnoreCase) ||
+                        name.Equals("$RECYCLE.BIN", StringComparison.OrdinalIgnoreCase)) continue;
+                    try
+                    {
+                        if ((File.GetAttributes(folder) & FileAttributes.ReparsePoint) == 0) directories.Push(folder);
+                    }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+        return (total, largest);
+    }
+
+    private static (long TotalBytes, long LargestFileBytes) CalculateSelectedContentStats(PartitionConfig partition)
+    {
+        long total = 0;
+        long largest = 0;
+        foreach (var folder in partition.SourceFolders.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            var stats = CalculateDirectoryStats(folder);
+            total = SaturatingAdd(total, stats.TotalBytes);
+            largest = Math.Max(largest, stats.LargestFileBytes);
+        }
+
+        var files = partition.SourceFiles
+            .Concat(string.IsNullOrWhiteSpace(partition.AutounattendSource) ? [] : [partition.AutounattendSource])
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+        foreach (var file in files)
+        {
+            var length = GetFileLength(file);
+            total = SaturatingAdd(total, length);
+            largest = Math.Max(largest, length);
+        }
+        return (total, largest);
+    }
+
+    private async Task RefreshPartitionContentSizeAsync(PartitionConfig partition, bool showWarning)
+    {
+        SetStatus("Checking content", "#B36A13");
+        var stats = await Task.Run(() => CalculateSelectedContentStats(partition));
+        partition.SelectedContentBytes = stats.TotalBytes;
+        partition.LargestSelectedFileBytes = stats.LargestFileBytes;
+        UpdatePartitionPreview(SelectedDisks());
+        MainPartitionList.Items.Refresh();
+        SetStatus(Localization.Text(_preferences.Language, "Ready"), "#147A4B");
+
+        if (!showWarning) return;
+        var disks = SelectedDisks();
+        var warnings = disks.Count > 0
+            ? GetContentCapacityWarnings(disks, partition)
+            : GetFixedPartitionCapacityWarnings(partition);
+        if (warnings.Count > 0)
+            MessageBox.Show($"The selected files and folders will not fit:\n\n{string.Join("\n", warnings)}\n\nIncrease the partition size or remove content.",
+                "Partition content will not fit", MessageBoxButton.OK, MessageBoxImage.Warning);
+    }
+
+    private async Task RefreshAllPartitionContentSizesAsync()
+    {
+        var stats = await Task.WhenAll(_partitions.Select(partition =>
+            Task.Run(() => CalculateSelectedContentStats(partition))));
+        for (var index = 0; index < _partitions.Count; index++)
+        {
+            _partitions[index].SelectedContentBytes = stats[index].TotalBytes;
+            _partitions[index].LargestSelectedFileBytes = stats[index].LargestFileBytes;
+        }
+    }
+
+    private static long SaturatingAdd(long left, long right) =>
+        left > long.MaxValue - right ? long.MaxValue : left + right;
+
+    private static long EstimateRequiredPartitionCapacity(PartitionConfig partition)
+    {
+        var isoBytes = partition.ExtractedIsoBytes ??
+            (string.IsNullOrWhiteSpace(partition.IsoSource) ? 0 : GetFileLength(partition.IsoSource));
+        var contentBytes = SaturatingAdd(partition.SelectedContentBytes, isoBytes);
+        if (contentBytes == 0) return 0;
+        var reserve = partition.HasIso
+            ? 256L * 1024 * 1024
+            : Math.Clamp(contentBytes / 100, 1L * 1024 * 1024, 256L * 1024 * 1024);
+        return SaturatingAdd(contentBytes, reserve);
+    }
+
+    private long GetPartitionCapacity(PartitionConfig partition, UsbDisk disk)
+    {
+        if (!partition.IsRemaining)
+            return PartitionConfig.TryParseSize(partition.SizeText, out var size) ? size : 0;
+        var fixedSize = _partitions.Where(item => !item.IsRemaining)
+            .Sum(item => PartitionConfig.TryParseSize(item.SizeText, out var bytes) ? bytes : 0);
+        return Math.Max(0, disk.Size - fixedSize);
+    }
+
+    private List<string> GetContentCapacityWarnings(IReadOnlyList<UsbDisk> disks, PartitionConfig? onlyPartition = null)
+    {
+        var warnings = new List<string>();
+        foreach (var partition in _partitions.Where(item => onlyPartition is null || ReferenceEquals(item, onlyPartition)))
+            if (HasFat32FileSizeViolation(partition))
+                warnings.Add($"{partition.Name}: contains a file larger than FAT32's 4 GB single-file limit");
+        foreach (var disk in disks)
+        foreach (var partition in _partitions.Where(item => onlyPartition is null || ReferenceEquals(item, onlyPartition)))
+        {
+            var required = EstimateRequiredPartitionCapacity(partition);
+            if (required == 0) continue;
+            var capacity = GetPartitionCapacity(partition, disk);
+            if (required > capacity)
+                warnings.Add($"Disk {disk.Number} · {partition.Name}: approximately {FormatBytes(required)} required, {FormatBytes(capacity)} available");
+        }
+        return warnings;
+    }
+
+    private static List<string> GetFixedPartitionCapacityWarnings(PartitionConfig partition)
+    {
+        if (HasFat32FileSizeViolation(partition))
+            return [$"{partition.Name}: contains a file larger than FAT32's 4 GB single-file limit"];
+        if (partition.IsRemaining || !PartitionConfig.TryParseSize(partition.SizeText, out var capacity)) return [];
+        var required = EstimateRequiredPartitionCapacity(partition);
+        return required > capacity
+            ? [$"{partition.Name}: approximately {FormatBytes(required)} required, {FormatBytes(capacity)} available"]
+            : [];
+    }
+
+    private static bool HasFat32FileSizeViolation(PartitionConfig partition) =>
+        partition.FileSystem == "FAT32" && partition.LargestSelectedFileBytes > uint.MaxValue;
+
+    private static long GetFileLength(string path)
+    {
+        try { return new FileInfo(path).Length; }
+        catch (IOException) { return 0; }
+        catch (UnauthorizedAccessException) { return 0; }
+    }
+
+    private void InitializeEtaTracking(long bytesPerDrive, int driveCount)
+    {
+        var now = DateTime.UtcNow;
+        lock (_etaSync)
+        {
+            _queueBytesPerDrive = Math.Max(0, bytesPerDrive);
+            _queueBytesTotal = _queueBytesPerDrive * driveCount;
+            _queueBytesCopied = 0;
+            _queueSampleBytes = 0;
+            _queueStartedUtc = now;
+            _queueSampleUtc = now;
+            _queueBytesPerSecond = 0;
+            _lastEtaUiUpdateUtc = DateTime.MinValue;
+        }
+        CurrentEtaText.Text = "Current activity: Preparing drive...";
+    }
+
+    private void StartQueueDiskEstimate()
+    {
+        lock (_etaSync) _queueDiskStartBytes = _queueBytesCopied;
+    }
+
+    private void CompleteQueueDiskEstimate()
+    {
+        lock (_etaSync)
+        {
+            var expectedEnd = Math.Min(_queueBytesTotal, _queueDiskStartBytes + _queueBytesPerDrive);
+            if (_queueBytesCopied < expectedEnd) _queueBytesCopied = expectedEnd;
+            _queueSampleBytes = _queueBytesCopied;
+            _queueSampleUtc = DateTime.UtcNow;
+        }
+        UpdateEtaDisplay();
+    }
+
+    private void BeginTransferActivity(string name, long totalBytes, double startProgress, double endProgress)
+    {
+        var now = DateTime.UtcNow;
+        lock (_etaSync)
+        {
+            _activityBytesTotal = Math.Max(0, totalBytes);
+            _activityBytesCopied = 0;
+            _activitySampleBytes = 0;
+            _activityStartedUtc = now;
+            _activitySampleUtc = now;
+            _activityBytesPerSecond = 0;
+            _activityProgressStart = startProgress;
+            _activityProgressEnd = endProgress;
+            _activityName = name;
+        }
+        CurrentEtaText.Text = totalBytes > 0 ? $"Current activity: {name} (0%)" : $"Current activity: {name}";
+    }
+
+    private void EndTransferActivity()
+    {
+        lock (_etaSync)
+        {
+            _activityBytesTotal = 0;
+            _activityBytesCopied = 0;
+            _activityBytesPerSecond = 0;
+        }
+    }
+
+    private void SetNonTransferActivity(string text)
+    {
+        EndTransferActivity();
+        CurrentEtaText.Text = $"Current activity: {text}";
+    }
+
+    private void ReportTransferBytes(long bytes)
+    {
+        if (bytes <= 0) return;
+        var now = DateTime.UtcNow;
+        var refreshUi = false;
+        lock (_etaSync)
+        {
+            _activityBytesCopied += bytes;
+            _queueBytesCopied += bytes;
+
+            var activitySeconds = (now - _activitySampleUtc).TotalSeconds;
+            if (activitySeconds >= 0.5)
+            {
+                var rate = (_activityBytesCopied - _activitySampleBytes) / activitySeconds;
+                _activityBytesPerSecond = SmoothRate(_activityBytesPerSecond, rate);
+                _activitySampleBytes = _activityBytesCopied;
+                _activitySampleUtc = now;
+            }
+
+            var queueSeconds = (now - _queueSampleUtc).TotalSeconds;
+            if (queueSeconds >= 0.5)
+            {
+                var rate = (_queueBytesCopied - _queueSampleBytes) / queueSeconds;
+                _queueBytesPerSecond = SmoothRate(_queueBytesPerSecond, rate);
+                _queueSampleBytes = _queueBytesCopied;
+                _queueSampleUtc = now;
+            }
+
+            if ((now - _lastEtaUiUpdateUtc).TotalSeconds >= 0.5)
+            {
+                _lastEtaUiUpdateUtc = now;
+                refreshUi = true;
+            }
+        }
+        if (refreshUi) Dispatcher.BeginInvoke(new Action(UpdateEtaDisplay));
+    }
+
+    private void UpdateEtaDisplay()
+    {
+        long activityTotal;
+        long activityCopied;
+        long queueTotal;
+        long queueCopied;
+        double activityRate;
+        double queueRate;
+        double progressStart;
+        double progressEnd;
+        DateTime activityStarted;
+        DateTime queueStarted;
+        string activityName;
+        lock (_etaSync)
+        {
+            activityTotal = _activityBytesTotal;
+            activityCopied = _activityBytesCopied;
+            queueTotal = _queueBytesTotal;
+            queueCopied = _queueBytesCopied;
+            activityRate = _activityBytesPerSecond;
+            queueRate = _queueBytesPerSecond;
+            progressStart = _activityProgressStart;
+            progressEnd = _activityProgressEnd;
+            activityStarted = _activityStartedUtc;
+            queueStarted = _queueStartedUtc;
+            activityName = _activityName;
+        }
+
+        if (activityTotal > 0)
+        {
+            var fraction = Math.Clamp((double)activityCopied / activityTotal, 0, 1);
+            BuildProgress.Value = progressStart + (progressEnd - progressStart) * fraction;
+            CurrentEtaText.Text = $"Current activity: {activityName} ({fraction:P0})";
+        }
+    }
+
+    private void CompleteEtaTracking()
+    {
+        EndTransferActivity();
+        CurrentEtaText.Text = "Current activity: Finished";
+    }
+
+    private static double SmoothRate(double current, double sample) => current <= 0 ? sample : current * 0.75 + sample * 0.25;
 
     private async Task CopyUnattendAsync(string source, string destination)
     {
@@ -457,9 +1002,41 @@ public partial class MainWindow : Window
 
     private static string CleanPowerShellError(string error)
     {
-        var first = error.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
-        return first?.Replace("#< CLIXML", "").Trim() ?? "Windows storage operation failed.";
+        var trimmed = error.Trim();
+        if (trimmed.StartsWith("#< CLIXML", StringComparison.OrdinalIgnoreCase))
+        {
+            var xmlStart = trimmed.IndexOf('<', "#< CLIXML".Length);
+            if (xmlStart >= 0)
+            {
+                try
+                {
+                    var document = System.Xml.Linq.XDocument.Parse(trimmed[xmlStart..]);
+                    var serializedErrors = document.Descendants()
+                        .Where(element => element.Name.LocalName == "S" &&
+                                          string.Equals(element.Attribute("S")?.Value, "Error", StringComparison.OrdinalIgnoreCase))
+                        .Select(element => DecodeCliXmlText(element.Value));
+                    foreach (var serializedError in serializedErrors)
+                    {
+                        var firstLine = FirstMeaningfulErrorLine(serializedError);
+                        if (firstLine is not null) return firstLine;
+                    }
+                }
+                catch (System.Xml.XmlException) { }
+            }
+        }
+
+        var withoutMarkup = Regex.Replace(trimmed.Replace("#< CLIXML", "", StringComparison.OrdinalIgnoreCase), "<[^>]+>", " ");
+        return FirstMeaningfulErrorLine(DecodeCliXmlText(withoutMarkup)) ?? "Windows storage operation failed.";
     }
+
+    private static string DecodeCliXmlText(string value) =>
+        WebUtility.HtmlDecode(Regex.Replace(value, @"_x([0-9A-Fa-f]{4})_",
+            match => char.ConvertFromUtf32(Convert.ToInt32(match.Groups[1].Value, 16))));
+
+    private static string? FirstMeaningfulErrorLine(string value) =>
+        value.Split(new[] { "\r\n", "\n", "\r" }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => line.Trim())
+            .FirstOrDefault(line => !string.IsNullOrWhiteSpace(line));
 
     private void SetBuildingState(bool building)
     {
@@ -471,10 +1048,41 @@ public partial class MainWindow : Window
         UpdateBuildButton();
     }
 
+    private void SetPreflightState(bool preflighting)
+    {
+        if (_isPreflighting == preflighting) return;
+        _isPreflighting = preflighting;
+        var interactive = !preflighting && !_isBuilding;
+        ConfigButton.IsEnabled = interactive;
+        DiskPicker.IsEnabled = interactive;
+        RefreshButton.IsEnabled = interactive;
+        MainPartitionList.IsEnabled = interactive;
+        AddPartitionButton.IsEnabled = interactive;
+        MainDefaultsButton.IsEnabled = interactive;
+        ConfirmText.IsEnabled = interactive;
+        Mouse.OverrideCursor = preflighting ? Cursors.Wait : null;
+        if (preflighting)
+        {
+            SetStatus("Preparing build", "#B36A13");
+            BuildProgress.IsIndeterminate = true;
+            CurrentEtaText.Text = "Current activity: Checking targets, sources, and ISO media...";
+            QueueEtaText.Visibility = Visibility.Collapsed;
+            AddActivity("Preparing build: checking targets, sources, and ISO media before confirmation.");
+        }
+        else if (!_isBuilding)
+        {
+            BuildProgress.IsIndeterminate = false;
+            BuildProgress.Value = 0;
+            CurrentEtaText.Text = "Current activity: Waiting";
+            SetStatus(Localization.Text(_preferences.Language, "Ready"), "#147A4B");
+        }
+        UpdateBuildButton();
+    }
+
     private void UpdateBuildButton()
     {
         if (!IsInitialized || BuildButton is null) return;
-        BuildButton.IsEnabled = !_isBuilding && DiskPicker.SelectedItems.Count > 0 && ConfirmText.Text == "ERASE";
+        BuildButton.IsEnabled = !_isBuilding && !_isPreflighting && DiskPicker.SelectedItems.Count > 0 && ConfirmText.Text == "ERASE";
     }
 
     private void AddActivity(string message)
@@ -502,7 +1110,7 @@ public partial class MainWindow : Window
         string T(string key) => Localization.Text(_preferences.Language, key);
         SubtitleText.Text = T("Subtitle"); SelectDriveTitle.Text = $"1. {T("Select USB Drive")}";
         RefreshButton.Content = T("Refresh");
-        PartitionEditorTitle.Text = T("Partition Settings"); MainDefaultsButton.Content = "Defaults"; PartitionLayoutTitle.Text = T("Partition Layout"); PartitionLayoutNote.Text = T("GPT Note");
+        PartitionEditorTitle.Text = T("Partition Settings"); MainDefaultsButton.Content = "Defaults"; PartitionLayoutTitle.Text = T("Partition Layout"); PartitionLayoutNote.Text = T("GPT Note").Replace("GPT", "MBR");
         WarningText.Text = T("Warning"); ActivityTitle.Text = T("Activity"); ConfirmLabel.Text = T("Confirm ERASE"); BuildButton.Content = T("Build USB Queue");
         if (!_isBuilding) HeaderStatus.Text = T("Ready");
     }
@@ -541,7 +1149,7 @@ public partial class MainWindow : Window
             if (loaded is not null)
                 foreach (var partition in loaded)
                     if (partition.SizeText.Trim().Equals("Remaining", StringComparison.OrdinalIgnoreCase)) partition.SizeText = "*";
-            if (loaded is null || loaded.Count is < 1 or > 6 || loaded.Count(p => p.IsRemaining) != 1) return PartitionConfig.CreateDefaults();
+            if (loaded is null || loaded.Count is < 1 or > 4 || loaded.Count(p => p.IsRemaining) != 1) return PartitionConfig.CreateDefaults();
             if (loaded.Any(p => !PartitionConfig.AllowedFormats.Contains(p.FileSystem))) return PartitionConfig.CreateDefaults();
             for (var i = 0; i < loaded.Count; i++)
                 if (!loaded[i].IsRemaining && (!PartitionConfig.TryParseSize(loaded[i].SizeText, out var bytes) || bytes < 32L * 1024 * 1024))
@@ -565,7 +1173,7 @@ public partial class MainWindow : Window
     private bool ValidatePartitionLayout(out string message)
     {
         message = "";
-        if (_partitions.Count is < 1 or > 6) { message = "Choose between 1 and 6 partitions."; return false; }
+        if (_partitions.Count is < 1 or > 4) { message = "Choose between 1 and 4 partitions for an MBR USB."; return false; }
         if (_partitions.Count(p => p.IsRemaining) != 1) { message = "Exactly one partition must use * for remaining space."; return false; }
         if (_partitions.Select(p => p.Name.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count() != _partitions.Count)
         { message = "Every volume label must be unique."; return false; }
@@ -578,10 +1186,12 @@ public partial class MainWindow : Window
             if (!PartitionConfig.AllowedFormats.Contains(item.FileSystem)) { message = $"Partition {item.Number} has an unsupported format."; return false; }
             var maxLength = item.FileSystem == "FAT32" ? 11 : item.FileSystem == "exFAT" ? 15 : 32;
             if (item.Name.Length > maxLength) { message = $"{item.FileSystem} label '{item.Name}' exceeds {maxLength} characters."; return false; }
+            if (item.HasIso && (item.FileSystem != "NTFS" || item.IsRemaining)) { message = $"Partition {item.Number} must be a fixed-size NTFS partition for bootable Windows media."; return false; }
             if (item.IsRemaining) continue;
             if (!PartitionConfig.TryParseSize(item.SizeText, out var bytes)) { message = $"Partition {item.Number} needs a size such as 50 MB or 20 GB, or * for remaining space."; return false; }
             if (bytes < 32L * 1024 * 1024) { message = $"Partition {item.Number} must be at least 32 MB."; return false; }
             if (item.FileSystem == "FAT32" && bytes > 32L * 1024 * 1024 * 1024) { message = $"Partition {item.Number} exceeds Windows' 32 GB FAT32 formatting limit."; return false; }
+            if (item.HasIso && bytes < 5L * 1024 * 1024 * 1024) { message = $"Bootable ISO partition {item.Number} must be at least 5 GB."; return false; }
         }
         return true;
     }
@@ -614,10 +1224,10 @@ public partial class MainWindow : Window
 
     private void PartitionFormat_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if ((sender as FrameworkElement)?.DataContext is PartitionConfig partition && partition.FileSystem != "NTFS")
+        if ((sender as FrameworkElement)?.DataContext is PartitionConfig partition)
         {
-            partition.AutounattendSource = null;
-            partition.IsoSource = null;
+            if (partition.FileSystem != "NTFS") { partition.IsoSource = null; partition.ExtractedIsoBytes = null; }
+            if (partition.FileSystem != "NTFS" && !partition.HasIso) partition.AutounattendSource = null;
         }
         if (IsLoaded) QueuePartitionConfigurationChanged();
     }
@@ -787,6 +1397,7 @@ public partial class MainWindow : Window
         if (disks.Count == 0)
         {
             foreach (var partition in _partitions) partition.CalculatedSizeText = null;
+            PartitionLayoutNote.Text = "Each selected disk will use an MBR partition table and UEFI-only Windows boot media.";
             return;
         }
 
@@ -799,6 +1410,7 @@ public partial class MainWindow : Window
         PartitionPreview.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(showDiskLabel ? 54 : 0) });
         PartitionPreview.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
+        var hasCapacityWarning = false;
         for (var diskIndex = 0; diskIndex < disks.Count; diskIndex++)
         {
             var disk = disks[diskIndex];
@@ -841,9 +1453,12 @@ public partial class MainWindow : Window
                     MinWidth = compact ? 34 : 90
                 });
                 var detailText = _partitions[i].IsRemaining ? $"{FormatBytes(partitionSizes[i])} | {_partitions[i].FileSystem}" : _partitions[i].PreviewText;
+                var requiredCapacity = EstimateRequiredPartitionCapacity(_partitions[i]);
+                var contentWillNotFit = requiredCapacity > partitionSizes[i] || HasFat32FileSizeViolation(_partitions[i]);
+                hasCapacityWarning |= contentWillNotFit;
                 var label = new TextBlock
                 {
-                    Text = compact ? _partitions[i].Name : $"{_partitions[i].Name}\n{detailText}",
+                    Text = compact ? $"{(contentWillNotFit ? "⚠ " : "")}{_partitions[i].Name}" : $"{(contentWillNotFit ? "⚠ " : "")}{_partitions[i].Name}\n{detailText}",
                     FontWeight = FontWeights.Bold, FontSize = compact ? (rowHeight < 18 ? 8 : 10) : 12,
                     TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center,
                 };
@@ -852,6 +1467,10 @@ public partial class MainWindow : Window
                 tooltipContent.Children.Add(new TextBlock { Text = $"Disk {disk.Number} · {_partitions[i].Name}", FontWeight = FontWeights.Bold, FontSize = 13 });
                 tooltipContent.Children.Add(new TextBlock { Text = $"Size: {FormatBytes(partitionSizes[i])}", Margin = new Thickness(0, 4, 0, 0) });
                 tooltipContent.Children.Add(new TextBlock { Text = $"Format: {_partitions[i].FileSystem}", Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#526970")) });
+                if (requiredCapacity > 0)
+                    tooltipContent.Children.Add(new TextBlock { Text = $"Selected content: approximately {FormatBytes(requiredCapacity)} required", Margin = new Thickness(0, 3, 0, 0) });
+                if (contentWillNotFit)
+                    tooltipContent.Children.Add(new TextBlock { Text = "WARNING: Selected content will not fit.", FontWeight = FontWeights.Bold, Margin = new Thickness(0, 4, 0, 0) });
                 var segment = new Border
                 {
                     BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(compact ? 5 : 10),
@@ -859,14 +1478,18 @@ public partial class MainWindow : Window
                     Margin = new Thickness(2, 1, 2, 1), Child = label,
                     ToolTip = new ToolTip { Content = tooltipContent }
                 };
-                segment.SetResourceReference(Border.BackgroundProperty, $"PartitionBackground{i % 6}");
-                segment.SetResourceReference(Border.BorderBrushProperty, $"PartitionBorder{i % 6}");
+                segment.SetResourceReference(Border.BackgroundProperty, contentWillNotFit ? "WarningBackground" : $"PartitionBackground{i % 6}");
+                segment.SetResourceReference(Border.BorderBrushProperty, contentWillNotFit ? "WarningBorder" : $"PartitionBorder{i % 6}");
+                if (contentWillNotFit) label.SetResourceReference(TextBlock.ForegroundProperty, "WarningText");
                 ToolTipService.SetInitialShowDelay(segment, 180);
                 ToolTipService.SetShowDuration(segment, 12000);
                 Grid.SetColumn(segment, i);
                 strip.Children.Add(segment);
             }
         }
+        PartitionLayoutNote.Text = hasCapacityWarning
+            ? "Warning: selected content will not fit in one or more highlighted partitions."
+            : "Each selected disk will use an MBR partition table and UEFI-only Windows boot media.";
     }
 
     private List<UsbDisk> DeserializeUsbDisks(string json)
@@ -965,7 +1588,7 @@ public partial class MainWindow : Window
     }
     private void AddPartition_Click(object sender, RoutedEventArgs e)
     {
-        if (_partitions.Count >= 6) { MessageBox.Show("A maximum of six partitions is supported.", "Partition limit", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        if (_partitions.Count >= 4) { MessageBox.Show("MBR supports a maximum of four partitions.", "Partition limit", MessageBoxButton.OK, MessageBoxImage.Information); return; }
         _partitions.Add(new PartitionConfig
         {
             Number = _partitions.Count + 1,
@@ -996,50 +1619,77 @@ public partial class MainWindow : Window
         PartitionConfigurationChanged();
     }
 
-    private void PartitionFiles_Click(object sender, RoutedEventArgs e)
+    private async void PartitionFiles_Click(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is not PartitionConfig partition) return;
         var dialog = new OpenFileDialog { Title = $"Select files for {partition.Name}", Filter = "All files (*.*)|*.*", CheckFileExists = true, Multiselect = true };
         if (dialog.ShowDialog() != true) return;
         foreach (var path in dialog.FileNames)
             if (!partition.SourceFiles.Any(existing => existing.Equals(path, StringComparison.OrdinalIgnoreCase))) partition.SourceFiles.Add(path);
-        MainPartitionList.Items.Refresh(); UpdateBuildButton();
+        await RefreshPartitionContentSizeAsync(partition, true); UpdateBuildButton();
     }
 
-    private void PartitionFolders_Click(object sender, RoutedEventArgs e)
+    private async void PartitionFolders_Click(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is not PartitionConfig partition) return;
         var dialog = new OpenFolderDialog { Title = $"Select a folder for {partition.Name}", Multiselect = false };
         if (dialog.ShowDialog() != true) return;
         if (!partition.SourceFolders.Any(existing => existing.Equals(dialog.FolderName, StringComparison.OrdinalIgnoreCase))) partition.SourceFolders.Add(dialog.FolderName);
-        MainPartitionList.Items.Refresh(); UpdateBuildButton();
+        await RefreshPartitionContentSizeAsync(partition, true); UpdateBuildButton();
     }
 
-    private void PartitionAutounattend_Click(object sender, RoutedEventArgs e)
+    private async void PartitionAutounattend_Click(object sender, RoutedEventArgs e)
     {
-        if ((sender as FrameworkElement)?.DataContext is not PartitionConfig partition || partition.FileSystem != "NTFS") return;
+        if ((sender as FrameworkElement)?.DataContext is not PartitionConfig partition || (partition.FileSystem != "NTFS" && !partition.HasIso)) return;
         var dialog = new OpenFileDialog { Title = $"Select Autounattend.xml for {partition.Name}", Filter = "XML files (*.xml)|*.xml|All files (*.*)|*.*", CheckFileExists = true, Multiselect = false };
         if (dialog.ShowDialog() != true) return;
         partition.AutounattendSource = dialog.FileName;
-        MainPartitionList.Items.Refresh(); UpdateBuildButton();
+        await RefreshPartitionContentSizeAsync(partition, true); UpdateBuildButton();
     }
 
     private void PartitionIso_Click(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is not PartitionConfig partition || partition.FileSystem != "NTFS") return;
+        if (_partitions.Any(item => !ReferenceEquals(item, partition) && item.HasIso))
+        {
+            MessageBox.Show("Only one bootable Windows ISO partition is supported on each USB drive. Clear the ISO from the other partition first.",
+                "Bootable ISO already selected", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        if (partition.IsRemaining)
+        {
+            MessageBox.Show("A bootable Windows ISO partition must use a fixed NTFS size of at least 5 GB.",
+                "Fixed size required", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        if (!PartitionConfig.TryParseSize(partition.SizeText, out var partitionBytes) || partitionBytes < 5L * 1024 * 1024 * 1024)
+        {
+            MessageBox.Show("Set this partition to a fixed NTFS size of at least 5 GB before selecting a Windows ISO.",
+                "Boot partition size", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
         var dialog = new OpenFileDialog { Title = $"Select an ISO for {partition.Name}", Filter = "ISO images (*.iso)|*.iso", CheckFileExists = true, Multiselect = false };
         if (dialog.ShowDialog() != true) return;
+        if (new FileInfo(dialog.FileName).Length + 256L * 1024 * 1024 > partitionBytes)
+        {
+            MessageBox.Show($"The selected ISO needs more room than partition {partition.Name}. Increase the partition size and select it again.",
+                "Boot partition too small", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
         partition.IsoSource = dialog.FileName;
-        MainPartitionList.Items.Refresh(); UpdateBuildButton();
+        partition.ExtractedIsoBytes = null;
+        PartitionConfigurationChanged();
     }
 
     private void PartitionSourcesClear_Click(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is not PartitionConfig partition || (partition.SourceFiles.Count + partition.SourceFolders.Count == 0 && string.IsNullOrWhiteSpace(partition.AutounattendSource) && string.IsNullOrWhiteSpace(partition.IsoSource))) return;
         if (MessageBox.Show($"Clear all selected files and folders for {partition.Name}?", "Clear partition content", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
-        partition.SourceFiles.Clear(); partition.SourceFolders.Clear(); partition.AutounattendSource = null; partition.IsoSource = null; MainPartitionList.Items.Refresh(); UpdateBuildButton();
+        partition.SourceFiles.Clear(); partition.SourceFolders.Clear(); partition.AutounattendSource = null; partition.IsoSource = null; partition.SelectedContentBytes = 0; partition.LargestSelectedFileBytes = 0; partition.ExtractedIsoBytes = null; MainPartitionList.Items.Refresh(); UpdatePartitionPreview(SelectedDisks()); UpdateBuildButton();
     }
 }
+
+public sealed record BootableIsoInfo(long TotalBytes);
 
 public sealed class UsbDisk
 {
@@ -1050,7 +1700,8 @@ public sealed class UsbDisk
     public long Size { get; set; }
     public bool IsBoot { get; set; }
     public bool IsSystem { get; set; }
-    public string DiskTitle => $"Disk {Number}";
+    public string? DriveLetters { get; set; }
+    public string DiskTitle => string.IsNullOrWhiteSpace(DriveLetters) ? $"Disk {Number}" : $"Disk {Number}  |  {DriveLetters}";
     public string SizeDisplay => $"{Size / (1024d * 1024 * 1024):N2} GB";
     public string Display => $"Disk {Number}  |  {FriendlyName}  |  {Size / (1024d * 1024 * 1024):N2} GB";
 }

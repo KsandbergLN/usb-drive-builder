@@ -3,8 +3,10 @@ using System.IO;
 using System.Text.RegularExpressions;
 using System.Text.Json.Serialization;
 using System.ComponentModel;
+using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
 
@@ -24,7 +26,7 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
     public List<PartitionConfig> Result { get; private set; } = [];
     public string SelectedLanguage { get; private set; }
     public string SelectedTheme { get; private set; }
-    public bool CanAddDefaultPartitions => !_defaultsLocked && _items.Count < 6;
+    public bool CanAddDefaultPartitions => !_defaultsLocked && _items.Count < 4;
     public bool CanRemoveDefaultPartitions => !_defaultsLocked && _items.Count > 1;
     public bool DefaultsEditable => !_defaultsLocked;
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -244,7 +246,7 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
     private bool Validate(out string message)
     {
         message = "";
-        if (_items.Count is < 1 or > 6) { message = "Choose between 1 and 6 partitions."; return false; }
+        if (_items.Count is < 1 or > 4) { message = "Choose between 1 and 4 default partitions for an MBR USB."; return false; }
         if (_items.Count(p => p.IsRemaining) != 1)
         { message = "Exactly one partition must use * for remaining space."; return false; }
         if (_items.Select(p => p.Name.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count() != _items.Count)
@@ -338,6 +340,12 @@ public sealed class PartitionConfig
     public string? AutounattendSource { get; set; }
     [JsonIgnore]
     public string? IsoSource { get; set; }
+    [JsonIgnore]
+    public long SelectedContentBytes { get; set; }
+    [JsonIgnore]
+    public long LargestSelectedFileBytes { get; set; }
+    [JsonIgnore]
+    public long? ExtractedIsoBytes { get; set; }
     public bool IsRemaining => SizeText.Trim() == "*";
     public string PreviewText => $"{CalculatedSizeText ?? SizeText}  |  {FileSystem}";
     public string FilesButtonText => SourceFiles.Count == 0 ? "Files" : $"Files ({SourceFiles.Count})";
@@ -353,8 +361,8 @@ public sealed class PartitionConfig
             ? $"XML detected in a selected folder:\n{FolderXmlSource}"
             : "Select Autounattend.xml for this NTFS partition, or add a folder containing an XML file.";
     public string IsoToolTip => string.IsNullOrWhiteSpace(IsoSource)
-        ? "Select an ISO file for this NTFS partition."
-        : $"ISO selected:\n{IsoSource}";
+        ? "Select a Windows ISO to create bootable NTFS UEFI media."
+        : $"Bootable Windows ISO selected:\n{IsoSource}";
     public string SourcesToolTip => SourceFiles.Count + SourceFolders.Count == 0 && string.IsNullOrWhiteSpace(AutounattendSource) && string.IsNullOrWhiteSpace(IsoSource)
         ? "No content selected."
         : string.Join(Environment.NewLine,
@@ -401,4 +409,16 @@ public sealed class PartitionConfig
         bytes = (long)(value * multiplier);
         return true;
     }
+
+    public static bool IsSizeSyntaxValid(string? text) =>
+        !string.IsNullOrWhiteSpace(text) && (text.Trim() == "*" || TryParseSize(text, out _));
+}
+
+public sealed class SizeEntryValidConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture) =>
+        PartitionConfig.IsSizeSyntaxValid(value as string);
+
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) =>
+        Binding.DoNothing;
 }
