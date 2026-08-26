@@ -52,7 +52,7 @@ public partial class MainWindow : Window
     private double _activityProgressStart;
     private double _activityProgressEnd;
     private string _activityName = "Transfer";
-    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.25"}";
+    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.35"}";
     private const string MainPartitionDragFormat = "LaptopQaUsbBuilder.MainPartition";
     private const string ScriptRunnerName = "LaptopQA-RunScripts.cmd";
     private const string ScriptCleanupName = "LaptopQA-Cleanup.ps1";
@@ -174,6 +174,7 @@ public partial class MainWindow : Window
         var fileSources = _partitions.SelectMany(p => p.SourceFiles
                 .Concat(p.ScriptFiles)
                 .Concat(p.DriverFiles)
+                .Concat(p.DriverArchives)
                 .Concat(string.IsNullOrWhiteSpace(p.AutounattendSource) ? [] : [p.AutounattendSource])
                 .Concat(string.IsNullOrWhiteSpace(p.IsoSource) ? [] : [p.IsoSource]))
             .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
@@ -253,12 +254,17 @@ public partial class MainWindow : Window
                     foreach (var file in partition.DriverFiles)
                         if (!Path.GetExtension(file).Equals(".inf", StringComparison.OrdinalIgnoreCase))
                             throw new InvalidOperationException($"An individual driver selection is not an INF file: {file}");
+                    foreach (var archive in partition.DriverArchives)
+                        if (!Path.GetExtension(archive).Equals(".zip", StringComparison.OrdinalIgnoreCase) &&
+                            !Path.GetExtension(archive).Equals(".cab", StringComparison.OrdinalIgnoreCase))
+                            throw new InvalidOperationException($"A compressed driver pack is not a ZIP or CAB file: {archive}");
                 }
 
                 partition.IsoEditionName = edition.Name;
                 partition.ForceUnsignedDrivers = partition.HasDrivers && _preferences.ForceUnsignedDrivers;
                 var selection = new WindowsIsoSelection(edition.Index, edition.Name,
-                    partition.DriverFolders.ToArray(), partition.DriverFiles.ToArray(), partition.ForceUnsignedDrivers);
+                    partition.DriverFolders.ToArray(), partition.DriverFiles.ToArray(), partition.DriverArchives.ToArray(),
+                    partition.ForceUnsignedDrivers);
                 var preparer = new WindowsMediaPreparer(
                     message => { SetNonTransferActivity(message); AddActivity(message); },
                     Log, MountIsoAsync, DismountIsoAsync);
@@ -278,12 +284,14 @@ public partial class MainWindow : Window
             catch (IncompleteDriverPackageException ex)
             {
                 SetStatus(Localization.Text(_preferences.Language, "Ready"), "#147A4B");
+                Log($"Driver package preflight failed: {LogSanitizer.SanitizeException(ex)}");
                 MessageBox.Show(ex.Message, "Incomplete driver package", MessageBoxButton.OK, MessageBoxImage.Error);
                 return;
             }
             catch (Exception ex)
             {
                 SetStatus(Localization.Text(_preferences.Language, "Ready"), "#147A4B");
+                Log($"Windows media preparation failed: {LogSanitizer.SanitizeException(ex)}");
                 MessageBox.Show($"The selected ISO cannot be prepared as bootable Windows media.\n\n{ex.Message}",
                     "Windows media preparation failed", MessageBoxButton.OK, MessageBoxImage.Error);
                 return;
@@ -1948,55 +1956,36 @@ public partial class MainWindow : Window
     private async Task AddPartitionScriptFilesAsync(PartitionConfig partition, Window owner)
     {
         if (partition.FileSystem != "NTFS") return;
-        var dialog = new OpenFileDialog
-        {
-            Title = $"Select Windows Setup scripts and supporting files for {partition.Name}",
-            Filter = "All files (*.*)|*.*",
-            CheckFileExists = true,
-            Multiselect = true
-        };
-        if (dialog.ShowDialog(owner) != true) return;
-        var combined = partition.ScriptFiles.Concat(dialog.FileNames).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        var reserved = combined.Select(Path.GetFileName).FirstOrDefault(name =>
-            string.Equals(name, ScriptRunnerName, StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(name, ScriptCleanupName, StringComparison.OrdinalIgnoreCase));
-        if (reserved is not null)
-        {
-            MessageBox.Show($"'{reserved}' is reserved for the app-generated script runner. Rename that script before adding it.",
-                "Reserved script name", MessageBoxButton.OK, MessageBoxImage.Warning);
-            return;
-        }
-        var duplicateName = combined.GroupBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
-            .FirstOrDefault(group => group.Count() > 1)?.Key;
-        if (duplicateName is not null)
-        {
-            MessageBox.Show($"Two selected scripts are named '{duplicateName}'. Script filenames must be unique even when they come from different folders.",
-                "Duplicate script name", MessageBoxButton.OK, MessageBoxImage.Warning);
-            return;
-        }
-        foreach (var path in dialog.FileNames)
-            if (!partition.ScriptFiles.Contains(path, StringComparer.OrdinalIgnoreCase)) partition.ScriptFiles.Add(path);
+        var dialog = new ScriptSourcesDialog(partition.ScriptFiles, _preferences.Theme) { Owner = owner };
+        if (dialog.ShowDialog() != true) return;
+        partition.ScriptFiles.Clear();
+        foreach (var path in dialog.ScriptFiles) partition.ScriptFiles.Add(path);
         partition.PreparedAutounattendXml = null;
         await RefreshPartitionContentSizeAsync(partition, true);
         UpdateBuildButton();
+        AddActivity(partition.HasScripts
+            ? $"Setup script content updated for {partition.Name}: {partition.ScriptFiles.Count} file(s)."
+            : $"Setup script content removed from {partition.Name}.");
     }
 
     private Task AddPartitionDriversAsync(PartitionConfig partition, Window owner)
     {
         if (partition.FileSystem != "NTFS") return Task.CompletedTask;
-        var dialog = new DriverSourcesDialog(partition.DriverFolders, partition.DriverFiles,
+        var dialog = new DriverSourcesDialog(partition.DriverFolders, partition.DriverFiles, partition.DriverArchives,
             _preferences.ForceUnsignedDrivers, _preferences.Theme) { Owner = owner };
         if (dialog.ShowDialog() != true) return Task.CompletedTask;
         partition.DriverFolders.Clear();
         foreach (var path in dialog.DriverFolders) partition.DriverFolders.Add(path);
         partition.DriverFiles.Clear();
         foreach (var path in dialog.DriverFiles) partition.DriverFiles.Add(path);
+        partition.DriverArchives.Clear();
+        foreach (var path in dialog.DriverArchives) partition.DriverArchives.Add(path);
         partition.ForceUnsignedDrivers = partition.HasDrivers && _preferences.ForceUnsignedDrivers;
         partition.PreparedMediaPath = null;
         partition.ExtractedIsoBytes = null;
         PartitionConfigurationChanged();
         AddActivity(partition.HasDrivers
-            ? $"Driver injection updated for {partition.Name}: {partition.DriverFolders.Count} folder(s), {partition.DriverFiles.Count} individual INF file(s)."
+            ? $"Driver injection updated for {partition.Name}: {partition.DriverFolders.Count} folder(s), {partition.DriverFiles.Count} INF file(s), {partition.DriverArchives.Count} compressed pack(s)."
             : $"Driver injection removed from {partition.Name}.");
         return Task.CompletedTask;
     }
