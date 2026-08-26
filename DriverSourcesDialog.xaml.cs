@@ -11,12 +11,15 @@ public partial class DriverSourcesDialog : Window
     private readonly ObservableCollection<DriverSourceItem> _sources = [];
     public IReadOnlyList<string> DriverFolders { get; private set; } = [];
     public IReadOnlyList<string> DriverFiles { get; private set; } = [];
+    public IReadOnlyList<string> DriverArchives { get; private set; } = [];
 
-    public DriverSourcesDialog(IEnumerable<string> folders, IEnumerable<string> files, bool forceUnsigned, string theme)
+    public DriverSourcesDialog(IEnumerable<string> folders, IEnumerable<string> files, IEnumerable<string> archives,
+        bool forceUnsigned, string theme)
     {
         InitializeComponent();
-        foreach (var path in folders.Distinct(StringComparer.OrdinalIgnoreCase)) _sources.Add(new DriverSourceItem("Folder", path, true));
-        foreach (var path in files.Distinct(StringComparer.OrdinalIgnoreCase)) _sources.Add(new DriverSourceItem("INF file", path, false));
+        foreach (var path in folders.Distinct(StringComparer.OrdinalIgnoreCase)) _sources.Add(new DriverSourceItem("Folder", path, DriverSourceKind.Folder));
+        foreach (var path in files.Distinct(StringComparer.OrdinalIgnoreCase)) _sources.Add(new DriverSourceItem("INF file", path, DriverSourceKind.Inf));
+        foreach (var path in archives.Distinct(StringComparer.OrdinalIgnoreCase)) _sources.Add(new DriverSourceItem("Driver pack", path, DriverSourceKind.Archive));
         SourcesList.ItemsSource = _sources;
         UnsignedWarning.Visibility = forceUnsigned ? Visibility.Visible : Visibility.Collapsed;
         ThemeService.Apply(this, theme);
@@ -40,17 +43,27 @@ public partial class DriverSourcesDialog : Window
             MessageBox.Show($"The selected folder could not be read.\n\n{ex.Message}", "Drivers folder unavailable", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
-        if (!_sources.Any(item => item.IsFolder && item.Path.Equals(dialog.FolderName, StringComparison.OrdinalIgnoreCase)))
-            _sources.Add(new DriverSourceItem("Folder", dialog.FolderName, true));
+        if (!_sources.Any(item => item.KindValue == DriverSourceKind.Folder && item.Path.Equals(dialog.FolderName, StringComparison.OrdinalIgnoreCase)))
+            _sources.Add(new DriverSourceItem("Folder", dialog.FolderName, DriverSourceKind.Folder));
     }
 
     private void AddFiles_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new OpenFileDialog { Title = "Select individual INF driver packages", Filter = "Driver packages (*.inf)|*.inf", CheckFileExists = true, Multiselect = true };
+        var dialog = new OpenFileDialog
+        {
+            Title = "Select INF files or compressed driver packs",
+            Filter = "Driver files and packs (*.inf;*.zip;*.cab)|*.inf;*.zip;*.cab|INF packages (*.inf)|*.inf|Compressed driver packs (*.zip;*.cab)|*.zip;*.cab",
+            CheckFileExists = true,
+            Multiselect = true
+        };
         if (dialog.ShowDialog() != true) return;
         foreach (var path in dialog.FileNames)
-            if (!_sources.Any(item => !item.IsFolder && item.Path.Equals(path, StringComparison.OrdinalIgnoreCase)))
-                _sources.Add(new DriverSourceItem("INF file", path, false));
+        {
+            var isInf = Path.GetExtension(path).Equals(".inf", StringComparison.OrdinalIgnoreCase);
+            var sourceKind = isInf ? DriverSourceKind.Inf : DriverSourceKind.Archive;
+            if (!_sources.Any(item => item.KindValue == sourceKind && item.Path.Equals(path, StringComparison.OrdinalIgnoreCase)))
+                _sources.Add(new DriverSourceItem(isInf ? "INF file" : "Driver pack", path, sourceKind));
+        }
     }
 
     private void Remove_Click(object sender, RoutedEventArgs e)
@@ -60,15 +73,16 @@ public partial class DriverSourcesDialog : Window
 
     private void Clear_Click(object sender, RoutedEventArgs e) => _sources.Clear();
 
-    private void Save_Click(object sender, RoutedEventArgs e)
+    private void Close_Click(object sender, RoutedEventArgs e)
     {
-        DriverFolders = _sources.Where(item => item.IsFolder).Select(item => item.Path).ToArray();
-        DriverFiles = _sources.Where(item => !item.IsFolder).Select(item => item.Path).ToArray();
+        DriverFolders = _sources.Where(item => item.KindValue == DriverSourceKind.Folder).Select(item => item.Path).ToArray();
+        DriverFiles = _sources.Where(item => item.KindValue == DriverSourceKind.Inf).Select(item => item.Path).ToArray();
+        DriverArchives = _sources.Where(item => item.KindValue == DriverSourceKind.Archive).Select(item => item.Path).ToArray();
         DialogResult = true;
     }
 
-    private void Cancel_Click(object sender, RoutedEventArgs e) => DialogResult = false;
     private void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e) { if (e.ChangedButton == MouseButton.Left) DragMove(); }
 }
 
-public sealed record DriverSourceItem(string Kind, string Path, bool IsFolder);
+public enum DriverSourceKind { Folder, Inf, Archive }
+public sealed record DriverSourceItem(string Kind, string Path, DriverSourceKind KindValue);

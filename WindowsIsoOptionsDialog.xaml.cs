@@ -61,7 +61,8 @@ public sealed record WindowsIsoSelection(
     string EditionName,
     IReadOnlyList<string> DriverFolders,
     IReadOnlyList<string> DriverFiles,
+    IReadOnlyList<string> DriverArchives,
     bool ForceUnsigned)
 {
-    public bool AddDrivers => DriverFolders.Count + DriverFiles.Count > 0;
+    public bool AddDrivers => DriverFolders.Count + DriverFiles.Count + DriverArchives.Count > 0;
 }

@@ -358,6 +358,8 @@ public sealed class PartitionConfig
     [JsonIgnore]
     public ObservableCollection<string> DriverFiles { get; set; } = [];
     [JsonIgnore]
+    public ObservableCollection<string> DriverArchives { get; set; } = [];
+    [JsonIgnore]
     public bool ForceUnsignedDrivers { get; set; }
     [JsonIgnore]
     public string? PreparedMediaPath { get; set; }
@@ -375,7 +377,7 @@ public sealed class PartitionConfig
     public bool HasAutounattend => !string.IsNullOrWhiteSpace(AutounattendSource) || FolderXmlSource is not null;
     public bool HasIso => !string.IsNullOrWhiteSpace(IsoSource);
     public bool HasScripts => ScriptFiles.Count > 0;
-    public bool HasDrivers => DriverFolders.Count + DriverFiles.Count > 0;
+    public bool HasDrivers => DriverFolders.Count + DriverFiles.Count + DriverArchives.Count > 0;
     public bool HasAnyContent => SourceFiles.Count + SourceFolders.Count + ScriptFiles.Count > 0 ||
                                  !string.IsNullOrWhiteSpace(AutounattendSource) || HasIso || HasDrivers;
     public string AddedContentSummary
@@ -402,7 +404,7 @@ public sealed class PartitionConfig
         : string.Join(Environment.NewLine,
             $"Bootable Windows ISO selected:\n{IsoSource}",
             string.IsNullOrWhiteSpace(IsoEditionName) ? "" : $"Edition: {IsoEditionName}",
-            HasDrivers ? $"Drivers: {DriverFolders.Count} folder(s), {DriverFiles.Count} individual INF file(s)" : "Drivers: skipped").Trim();
+            HasDrivers ? $"Drivers: {DriverFolders.Count} folder(s), {DriverFiles.Count} INF file(s), {DriverArchives.Count} compressed pack(s)" : "Drivers: skipped").Trim();
     public string SourcesToolTip => !HasAnyContent
         ? "No content selected."
         : string.Join(Environment.NewLine,
@@ -413,7 +415,8 @@ public sealed class PartitionConfig
                 .Concat(string.IsNullOrWhiteSpace(IsoSource) ? [] : [$"ISO: {IsoSource}"])
                 .Concat(string.IsNullOrWhiteSpace(IsoEditionName) ? [] : [$"Windows edition: {IsoEditionName}"])
                 .Concat(DriverFolders.Select(path => $"Driver folder: {path}"))
-                .Concat(DriverFiles.Select(path => $"Driver INF: {path}")));
+                .Concat(DriverFiles.Select(path => $"Driver INF: {path}"))
+                .Concat(DriverArchives.Select(path => $"Compressed driver pack: {path}")));
     public PartitionConfig Clone()
     {
         var clone = new PartitionConfig { Number = Number, Name = Name, SizeText = SizeText, FileSystem = FileSystem };
@@ -426,6 +429,7 @@ public sealed class PartitionConfig
         clone.IsoEditionName = IsoEditionName;
         foreach (var path in DriverFolders) clone.DriverFolders.Add(path);
         foreach (var path in DriverFiles) clone.DriverFiles.Add(path);
+        foreach (var path in DriverArchives) clone.DriverArchives.Add(path);
         clone.ForceUnsignedDrivers = ForceUnsignedDrivers;
         return clone;
     }
@@ -437,6 +441,7 @@ public sealed class PartitionConfig
         IsoEditionName = null;
         DriverFolders.Clear();
         DriverFiles.Clear();
+        DriverArchives.Clear();
         ForceUnsignedDrivers = false;
         PreparedMediaPath = null;
         PreparedAutounattendXml = null;

@@ -158,7 +158,7 @@
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Orientation="Horizontal">
                                     <Button x:Name="AddPartitionButton" Style="{StaticResource CircleButton}" Content="+" Click="AddPartition_Click" Width="32" Height="32" Padding="0" FontSize="18" Background="{DynamicResource AddButtonBackground}" Foreground="{DynamicResource AddButtonForeground}" Margin="0,0,6,0" ToolTip="Add a partition"/>
-                                    <Button x:Name="MainDefaultsButton" Content="Defaults" Click="MainDefaults_Click" Padding="13,5" ToolTip="Restore the default partitions configured in Settings"/>
+                                    <Button x:Name="MainDefaultsButton" Content="Defaults" Click="MainDefaults_Click" Height="28" Padding="10,3" FontSize="12" ToolTip="Restore the default partitions configured in Settings"/>
                                 </StackPanel>
                             </Grid>
                             <ListBox x:Name="MainPartitionList" Grid.Row="1" MaxHeight="250" BorderThickness="0" Background="Transparent" SelectionMode="Single" ScrollViewer.VerticalScrollBarVisibility="Auto" AllowDrop="True" PreviewMouseMove="MainPartitionList_PreviewMouseMove" PreviewMouseLeftButtonUp="MainPartitionList_PreviewMouseLeftButtonUp" DragOver="MainPartitionList_DragOver" DragLeave="MainPartitionList_DragLeave" Drop="MainPartitionList_Drop">

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -29,6 +30,10 @@ public sealed class WindowsMediaPreparer
                 if (!Directory.Exists(folder)) throw new InvalidOperationException($"A selected drivers folder is no longer available: {folder}");
             foreach (var file in selection.DriverFiles)
                 if (!File.Exists(file)) throw new InvalidOperationException($"A selected INF driver is no longer available: {file}");
+            foreach (var archive in selection.DriverArchives)
+                if (!File.Exists(archive)) throw new InvalidOperationException($"A selected compressed driver pack is no longer available: {archive}");
+            selection = await ResolveDriverPacksAsync(selection);
+            selection = await ResolveCompressedDriverPayloadsAsync(selection);
             ValidateDriverPackages(selection);
         }
         var cacheKey = await CreateCacheKeyAsync(isoPath, selection);
@@ -48,7 +53,7 @@ public sealed class WindowsMediaPreparer
         var stagingParent = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "LaptopQAUsbBuilder", "Staging");
         Directory.CreateDirectory(stagingParent);
-        EnsureStagingSpace(stagingParent, info);
+        EnsureStagingSpace(stagingParent, info, selection);
         var stagingRoot = Path.Combine(stagingParent, Guid.NewGuid().ToString("N"));
         var mediaRoot = Path.Combine(stagingRoot, "media");
         Directory.CreateDirectory(mediaRoot);
@@ -90,9 +95,10 @@ public sealed class WindowsMediaPreparer
 
             DeleteDirectoryTree(cacheRoot);
             Directory.CreateDirectory(cacheRoot);
-            Directory.Move(mediaRoot, cachedMedia);
+            if (!await TryMoveCompletedCacheAsync(mediaRoot, cachedMedia, "Windows media"))
+                throw new IOException("Windows media preparation completed, but its cache directory remained locked after several retries.");
             File.WriteAllText(completeMarker,
-                $"Edition={selection.EditionName}{Environment.NewLine}Created={DateTimeOffset.Now:O}{Environment.NewLine}DriverFolders={selection.DriverFolders.Count}{Environment.NewLine}DriverFiles={selection.DriverFiles.Count}{Environment.NewLine}ForceUnsigned={selection.ForceUnsigned}");
+                $"Edition={selection.EditionName}{Environment.NewLine}Created={DateTimeOffset.Now:O}{Environment.NewLine}DriverFolders={selection.DriverFolders.Count}{Environment.NewLine}DriverFiles={selection.DriverFiles.Count}{Environment.NewLine}DriverPacks={selection.DriverArchives.Count}{Environment.NewLine}ForceUnsigned={selection.ForceUnsigned}");
             File.WriteAllText(rejectionReport, System.Text.Json.JsonSerializer.Serialize(driverRejections));
             var totalBytes = CalculateDirectoryBytes(cachedMedia);
             _activity($"Prepared {selection.EditionName} media cached for reuse.");
@@ -218,7 +224,14 @@ public sealed class WindowsMediaPreparer
         var completeListNote = rejectedDrivers.Count > 1
             ? $" {rejectedDrivers.Count} driver packages failed; the complete list was written to the build log."
             : "";
-        var useful = rejectedDrivers.Count > 0 && process.ExitCode is 2 or 3
+        var reportedCodes = rejectedDriverDetails.SelectMany(detail => detail.ErrorCodes)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var diskFull = process.ExitCode == 112 || reportedCodes.Contains("0x80070070", StringComparer.OrdinalIgnoreCase) ||
+                       output.Contains("not enough space", StringComparison.OrdinalIgnoreCase) ||
+                       error.Contains("not enough space", StringComparison.OrdinalIgnoreCase);
+        var useful = diskFull
+            ? $"DISM ran out of local system-drive space while servicing Windows (0x80070070). The {rejectedDrivers.Count} package(s) listed in the log were active when space ran out and are not necessarily invalid. Free space in %LOCALAPPDATA%\\LaptopQAUsbBuilder or elsewhere on the system drive, then try again."
+            : rejectedDrivers.Count > 0 && process.ExitCode is 2 or 3
             ? $"DISM could not import driver package '{rejectedDrivers[0]}' because a required package file or path is missing (0x8007000{process.ExitCode}).{completeListNote} Re-extract the complete driver package and try again."
             : rejectedDrivers.Count > 0
             ? $"DISM rejected driver package '{rejectedDrivers[0]}'. The package contains invalid or incompatible driver data.{completeListNote}"
@@ -290,6 +303,272 @@ public sealed class WindowsMediaPreparer
         return end > start ? line[start..end] : null;
     }
 
+    private async Task<WindowsIsoSelection> ResolveDriverPacksAsync(WindowsIsoSelection selection)
+    {
+        if (selection.DriverArchives.Count == 0) return selection;
+
+        var extractedFolders = new List<string>();
+        foreach (var archive in selection.DriverArchives.Distinct(StringComparer.OrdinalIgnoreCase))
+            extractedFolders.Add(await ExtractDriverPackAsync(archive));
+
+        return selection with
+        {
+            DriverFolders = selection.DriverFolders.Concat(extractedFolders)
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray()
+        };
+    }
+
+    private async Task<string> ExtractDriverPackAsync(string archivePath)
+    {
+        var extension = Path.GetExtension(archivePath);
+        if (!extension.Equals(".zip", StringComparison.OrdinalIgnoreCase) &&
+            !extension.Equals(".cab", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"Compressed driver packs must be ZIP or CAB files: {archivePath}");
+
+        _activity($"Checking compressed driver pack {Path.GetFileName(archivePath)}...");
+        var archiveHash = (await HashFileAsync(archivePath)).ToLowerInvariant();
+        var cacheParent = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "LaptopQAUsbBuilder", "DriverPackCache");
+        Directory.CreateDirectory(cacheParent);
+        var cacheRoot = Path.Combine(cacheParent, archiveHash);
+        var completeMarker = Path.Combine(cacheRoot, ".complete");
+        if (File.Exists(completeMarker) && Directory.Exists(cacheRoot) &&
+            Directory.EnumerateFiles(cacheRoot, "*.inf", SearchOption.AllDirectories).Any())
+        {
+            _log($"Compressed driver pack cache hit: {Path.GetFileName(archivePath)} ({archiveHash}).");
+            return cacheRoot;
+        }
+
+        var temporaryRoot = Path.Combine(cacheParent, $"extract-{archiveHash}-{Guid.NewGuid():N}");
+        var retainTemporaryRoot = false;
+        Directory.CreateDirectory(temporaryRoot);
+        try
+        {
+            _activity($"Extracting compressed driver pack {Path.GetFileName(archivePath)}...");
+            if (extension.Equals(".zip", StringComparison.OrdinalIgnoreCase))
+                await Task.Run(() => ExtractZipSafely(archivePath, temporaryRoot));
+            else
+                await ExtractCabAsync(archivePath, temporaryRoot);
+
+            var infCount = Directory.EnumerateFiles(temporaryRoot, "*.inf", SearchOption.AllDirectories).Count();
+            if (infCount == 0)
+                throw new InvalidOperationException($"Compressed driver pack '{Path.GetFileName(archivePath)}' does not contain any INF driver packages.");
+
+            File.WriteAllText(Path.Combine(temporaryRoot, ".complete"),
+                $"Source={Path.GetFileName(archivePath)}{Environment.NewLine}SHA256={archiveHash}{Environment.NewLine}INF={infCount}{Environment.NewLine}Extracted={DateTimeOffset.Now:O}");
+            if (!await TryMoveCompletedCacheAsync(temporaryRoot, cacheRoot, "compressed driver pack"))
+            {
+                retainTemporaryRoot = true;
+                _log($"The completed driver-pack cache directory remained temporarily locked. Continuing from its completed working directory: {temporaryRoot}");
+                return temporaryRoot;
+            }
+            _log($"Extracted compressed driver pack {Path.GetFileName(archivePath)} to cache; {infCount} INF package(s), SHA256 {archiveHash}.");
+            return cacheRoot;
+        }
+        catch (InvalidDataException ex)
+        {
+            throw new InvalidOperationException($"Compressed driver pack '{Path.GetFileName(archivePath)}' is damaged, unsupported, or password protected. {ex.Message}", ex);
+        }
+        finally
+        {
+            if (!retainTemporaryRoot) TryDeleteDirectory(temporaryRoot);
+        }
+    }
+
+    private static void ExtractZipSafely(string archivePath, string destinationRoot)
+    {
+        var safeRoot = Path.GetFullPath(destinationRoot) + Path.DirectorySeparatorChar;
+        using var archive = ZipFile.OpenRead(archivePath);
+        foreach (var entry in archive.Entries)
+        {
+            var destination = Path.GetFullPath(Path.Combine(destinationRoot,
+                entry.FullName.Replace('/', Path.DirectorySeparatorChar)));
+            if (!destination.StartsWith(safeRoot, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException($"The archive contains an unsafe path: {entry.FullName}");
+            if (string.IsNullOrEmpty(entry.Name))
+            {
+                Directory.CreateDirectory(destination);
+                continue;
+            }
+            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+            entry.ExtractToFile(destination, true);
+        }
+    }
+
+    private static async Task ExtractCabAsync(string archivePath, string destinationRoot)
+    {
+        var start = new ProcessStartInfo
+        {
+            FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "expand.exe"),
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        start.ArgumentList.Add(archivePath);
+        start.ArgumentList.Add("-F:*");
+        start.ArgumentList.Add(destinationRoot);
+        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start the Windows CAB extraction tool.");
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        var output = await outputTask;
+        var error = await errorTask;
+        if (process.ExitCode != 0)
+        {
+            var detail = string.IsNullOrWhiteSpace(error) ? output : error;
+            throw new InvalidDataException($"Windows CAB extraction returned exit code {process.ExitCode}. {detail.Trim()}");
+        }
+    }
+
+    private async Task<WindowsIsoSelection> ResolveCompressedDriverPayloadsAsync(WindowsIsoSelection selection)
+    {
+        var resolvedRoots = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        async Task<string> ResolveRootAsync(string root)
+        {
+            if (resolvedRoots.TryGetValue(root, out var existing)) return existing;
+            var resolved = await ExpandCompressedDriverRootAsync(root);
+            resolvedRoots[root] = resolved;
+            return resolved;
+        }
+
+        var folders = new List<string>();
+        foreach (var folder in selection.DriverFolders.Distinct(StringComparer.OrdinalIgnoreCase))
+            folders.Add(await ResolveRootAsync(folder));
+
+        var files = new List<string>();
+        foreach (var file in selection.DriverFiles.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            var parent = Path.GetDirectoryName(file) ?? throw new InvalidOperationException($"The selected INF path is invalid: {file}");
+            var resolvedParent = await ResolveRootAsync(parent);
+            files.Add(Path.Combine(resolvedParent, Path.GetRelativePath(parent, file)));
+        }
+
+        return selection with { DriverFolders = folders, DriverFiles = files };
+    }
+
+    private async Task<string> ExpandCompressedDriverRootAsync(string sourceRoot)
+    {
+        var safeRoot = Path.GetFullPath(sourceRoot) + Path.DirectorySeparatorChar;
+        var expansions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var infPath in Directory.EnumerateFiles(sourceRoot, "*.inf", SearchOption.AllDirectories))
+        {
+            var packageRoot = Path.GetDirectoryName(infPath) ?? sourceRoot;
+            foreach (var missingRelativePath in FindMissingDriverFiles(infPath).MissingFiles)
+            {
+                var expectedPath = Path.GetFullPath(Path.Combine(packageRoot, missingRelativePath));
+                if (!expectedPath.StartsWith(safeRoot, StringComparison.OrdinalIgnoreCase)) continue;
+                var compressedPath = GetLegacyCompressedPath(expectedPath);
+                if (compressedPath is not null && File.Exists(compressedPath))
+                    expansions.TryAdd(expectedPath, compressedPath);
+            }
+        }
+
+        if (expansions.Count == 0) return sourceRoot;
+
+        _activity($"Expanding {expansions.Count} compressed driver payload file(s) from {Path.GetFileName(sourceRoot)}...");
+        var sourceManifest = CreateDriverManifest(sourceRoot).ToLowerInvariant();
+        var cacheParent = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "LaptopQAUsbBuilder", "DriverPayloadCache");
+        Directory.CreateDirectory(cacheParent);
+        var cacheRoot = Path.Combine(cacheParent, sourceManifest);
+        var completeMarker = Path.Combine(cacheRoot, ".complete");
+        if (File.Exists(completeMarker) && expansions.Keys.All(expected =>
+                File.Exists(Path.Combine(cacheRoot, Path.GetRelativePath(sourceRoot, expected)))))
+        {
+            _log($"Expanded driver payload cache hit for {sourceRoot} ({sourceManifest}).");
+            return cacheRoot;
+        }
+
+        var temporaryRoot = Path.Combine(cacheParent, $"expand-{sourceManifest}-{Guid.NewGuid():N}");
+        var retainTemporaryRoot = false;
+        Directory.CreateDirectory(temporaryRoot);
+        try
+        {
+            await CopyDirectoryAsync(sourceRoot, temporaryRoot);
+            foreach (var pair in expansions)
+            {
+                var stagedExpected = Path.Combine(temporaryRoot, Path.GetRelativePath(sourceRoot, pair.Key));
+                var stagedCompressed = Path.Combine(temporaryRoot, Path.GetRelativePath(sourceRoot, pair.Value));
+                Directory.CreateDirectory(Path.GetDirectoryName(stagedExpected)!);
+                await ExpandCompressedFileAsync(stagedCompressed, stagedExpected);
+                if (!File.Exists(stagedExpected))
+                    throw new InvalidDataException($"Windows did not produce the expected driver payload '{Path.GetFileName(stagedExpected)}'.");
+                _log($"Expanded compressed driver payload {Path.GetFileName(pair.Value)} as {Path.GetFileName(pair.Key)}.");
+            }
+
+            File.WriteAllText(Path.Combine(temporaryRoot, ".complete"),
+                $"Source={sourceRoot}{Environment.NewLine}Manifest={sourceManifest}{Environment.NewLine}ExpandedFiles={expansions.Count}{Environment.NewLine}Created={DateTimeOffset.Now:O}");
+            if (!await TryMoveCompletedCacheAsync(temporaryRoot, cacheRoot, "expanded driver payload"))
+            {
+                retainTemporaryRoot = true;
+                _log($"The completed expanded-driver cache directory remained temporarily locked. Continuing from its completed working directory: {temporaryRoot}");
+                return temporaryRoot;
+            }
+            return cacheRoot;
+        }
+        finally
+        {
+            if (!retainTemporaryRoot) TryDeleteDirectory(temporaryRoot);
+        }
+    }
+
+    private async Task<bool> TryMoveCompletedCacheAsync(string source, string destination, string description)
+    {
+        Exception? lastError = null;
+        for (var attempt = 1; attempt <= 6; attempt++)
+        {
+            try
+            {
+                DeleteDirectoryTree(destination);
+                Directory.Move(source, destination);
+                if (attempt > 1) _log($"Published {description} cache after {attempt} attempts.");
+                return true;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                lastError = ex;
+                _log($"{description} cache publish attempt {attempt}/6 was blocked: {LogSanitizer.SanitizeException(ex)}");
+                if (attempt < 6) await Task.Delay(attempt * 350);
+            }
+        }
+        _log($"Could not publish {description} cache after retries: {LogSanitizer.SanitizeException(lastError!)}");
+        return false;
+    }
+
+    private static string? GetLegacyCompressedPath(string expectedPath)
+    {
+        var fileName = Path.GetFileName(expectedPath);
+        if (fileName.Length < 2 || fileName.EndsWith('_')) return null;
+        return Path.Combine(Path.GetDirectoryName(expectedPath) ?? "", fileName[..^1] + "_");
+    }
+
+    private static async Task ExpandCompressedFileAsync(string compressedPath, string destinationPath)
+    {
+        var start = new ProcessStartInfo
+        {
+            FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "expand.exe"),
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        start.ArgumentList.Add(compressedPath);
+        start.ArgumentList.Add(destinationPath);
+        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start the Windows compressed-file expansion tool.");
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        var output = await outputTask;
+        var error = await errorTask;
+        if (process.ExitCode != 0)
+        {
+            var detail = string.IsNullOrWhiteSpace(error) ? output : error;
+            throw new InvalidDataException($"Windows could not expand '{Path.GetFileName(compressedPath)}' (exit code {process.ExitCode}). {detail.Trim()}");
+        }
+    }
+
     private void ValidateDriverPackages(WindowsIsoSelection selection)
     {
         _activity("Checking driver packages for missing required files...");
@@ -326,6 +605,7 @@ public sealed class WindowsMediaPreparer
         var diskPaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var requiredPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var lines = File.ReadAllLines(infPath);
+        var sections = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         var section = "";
 
         foreach (var rawLine in lines)
@@ -334,48 +614,103 @@ public sealed class WindowsMediaPreparer
             if (line.StartsWith('[') && line.EndsWith(']'))
             {
                 section = line[1..^1].Trim();
+                if (!sections.ContainsKey(section)) sections[section] = [];
                 continue;
             }
-            if (!IsApplicableInfSection(section, "SourceDisksNames") || !TrySplitInfEntry(line, out var diskId, out var value)) continue;
-            var fields = value.Split(',');
-            if (fields.Length > 3)
+            if (section.Length > 0 && line.Length > 0) sections[section].Add(line);
+        }
+
+        foreach (var sourceNamesSection in sections.Where(item => IsApplicableInfSection(item.Key, "SourceDisksNames")))
+        {
+            foreach (var line in sourceNamesSection.Value)
             {
-                var diskPath = CleanInfValue(fields[3]).TrimStart('\\');
-                if (!diskPath.Contains('%')) diskPaths[diskId] = diskPath;
+                if (!TrySplitInfEntry(line, out var diskId, out var value)) continue;
+                var fields = value.Split(',');
+                if (fields.Length > 3)
+                {
+                    var diskPath = CleanInfValue(fields[3]).TrimStart('\\');
+                    if (!diskPath.Contains('%')) diskPaths[diskId] = diskPath;
+                }
             }
         }
 
-        section = "";
-        foreach (var rawLine in lines)
+        var sourceFiles = new Dictionary<string, (string Path, int Score)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var sourceFilesSection in sections.Where(item => IsApplicableInfSection(item.Key, "SourceDisksFiles")))
         {
-            var line = StripInfComment(rawLine).Trim();
-            if (line.StartsWith('[') && line.EndsWith(']'))
+            var score = InfDecorationScore(sourceFilesSection.Key);
+            foreach (var line in sourceFilesSection.Value)
             {
-                section = line[1..^1].Trim();
-                continue;
+                if (!TrySplitInfEntry(line, out var fileName, out var value)) continue;
+                fileName = CleanInfValue(fileName);
+                if (fileName.Length == 0 || fileName.Contains('%')) continue;
+                var fields = value.Split(',');
+                var diskId = fields.Length > 0 ? CleanInfValue(fields[0]) : "";
+                var relativeParts = new List<string>();
+                if (diskPaths.TryGetValue(diskId, out var diskPath) && diskPath.Length > 0) relativeParts.Add(diskPath);
+                if (fields.Length > 1)
+                {
+                    var subdirectory = CleanInfValue(fields[1]).TrimStart('\\');
+                    if (subdirectory.Length > 0 && !subdirectory.Contains('%')) relativeParts.Add(subdirectory);
+                }
+                relativeParts.Add(fileName);
+                var path = relativeParts.Aggregate(packageRoot, Path.Combine);
+                if (!sourceFiles.TryGetValue(fileName, out var existing) || score >= existing.Score)
+                    sourceFiles[fileName] = (path, score);
             }
-            if (!TrySplitInfEntry(line, out var name, out var value)) continue;
-            if (section.Equals("Version", StringComparison.OrdinalIgnoreCase) &&
-                name.StartsWith("CatalogFile", StringComparison.OrdinalIgnoreCase) && IsApplicableCatalogEntry(name))
+        }
+
+        var catalogEntries = sections.TryGetValue("Version", out var versionLines)
+            ? versionLines.Select(line => TrySplitInfEntry(line, out var name, out var value) ? (Name: name, Value: value) : default)
+                .Where(item => item.Name is not null && item.Name.StartsWith("CatalogFile", StringComparison.OrdinalIgnoreCase) && IsApplicableCatalogEntry(item.Name))
+                .ToArray()
+            : [];
+        var bestCatalogScore = catalogEntries.Length == 0 ? -1 : catalogEntries.Max(item => CatalogDecorationScore(item.Name));
+        foreach (var catalogEntry in catalogEntries.Where(item => CatalogDecorationScore(item.Name) == bestCatalogScore))
+        {
+            var catalog = CleanInfValue(catalogEntry.Value.Split(',')[0]);
+            if (!catalog.Contains('%')) requiredPaths.Add(Path.Combine(packageRoot, catalog));
+        }
+
+        var referencedCopySections = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var directlyReferencedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var candidateSection in sections.Where(item => IsApplicableX64Section(item.Key, sections)))
+        {
+            foreach (var line in candidateSection.Value)
             {
-                var catalog = CleanInfValue(value.Split(',')[0]);
-                if (!catalog.Contains('%')) requiredPaths.Add(Path.Combine(packageRoot, catalog));
-                continue;
+                if (!TrySplitInfEntry(line, out var name, out var value)) continue;
+                if (name.Equals("ServiceBinary", StringComparison.OrdinalIgnoreCase))
+                {
+                    var binary = CleanInfValue(value.Split(',')[0]).Replace("%12%", "", StringComparison.OrdinalIgnoreCase).TrimStart('\\');
+                    if (!binary.Contains('%') && binary.Length > 0) directlyReferencedFiles.Add(binary);
+                }
+                else if (name.Equals("CopyFiles", StringComparison.OrdinalIgnoreCase))
+                {
+                    foreach (var reference in value.Split(',').Select(CleanInfValue).Where(item => item.Length > 0))
+                    {
+                        if (reference.StartsWith('@')) directlyReferencedFiles.Add(reference[1..]);
+                        else referencedCopySections.Add(reference);
+                    }
+                }
             }
-            if (!IsApplicableInfSection(section, "SourceDisksFiles")) continue;
-            var fileName = CleanInfValue(name);
-            if (fileName.Length == 0 || fileName.Contains('%')) continue;
-            var fields = value.Split(',');
-            var diskId = fields.Length > 0 ? CleanInfValue(fields[0]) : "";
-            var relativeParts = new List<string>();
-            if (diskPaths.TryGetValue(diskId, out var diskPath) && diskPath.Length > 0) relativeParts.Add(diskPath);
-            if (fields.Length > 1)
+        }
+
+        foreach (var copySectionName in referencedCopySections)
+        {
+            if (!sections.TryGetValue(copySectionName, out var copyLines)) continue;
+            foreach (var line in copyLines)
             {
-                var subdirectory = CleanInfValue(fields[1]).TrimStart('\\');
-                if (subdirectory.Length > 0 && !subdirectory.Contains('%')) relativeParts.Add(subdirectory);
+                var fields = line.Split(',');
+                var destinationName = CleanInfValue(fields[0]);
+                var sourceName = fields.Length > 1 && CleanInfValue(fields[1]).Length > 0
+                    ? CleanInfValue(fields[1]) : destinationName;
+                if (sourceName.Length > 0 && !sourceName.Contains('%')) directlyReferencedFiles.Add(sourceName);
             }
-            relativeParts.Add(fileName);
-            requiredPaths.Add(relativeParts.Aggregate(packageRoot, Path.Combine));
+        }
+
+        foreach (var reference in directlyReferencedFiles)
+        {
+            var lookupName = Path.GetFileName(reference);
+            if (sourceFiles.TryGetValue(lookupName, out var source)) requiredPaths.Add(source.Path);
         }
 
         var missing = requiredPaths.Where(path => !File.Exists(path))
@@ -384,6 +719,27 @@ public sealed class WindowsMediaPreparer
             .ToArray();
         return new IncompleteDriverPackage(infPath, missing);
     }
+
+    private static bool IsApplicableSectionName(string section) =>
+        !section.Contains("x86", StringComparison.OrdinalIgnoreCase) &&
+        !section.Contains("arm", StringComparison.OrdinalIgnoreCase) &&
+        !section.Contains("ia64", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsApplicableX64Section(string section,
+        IReadOnlyDictionary<string, List<string>> sections)
+    {
+        if (!IsApplicableSectionName(section)) return false;
+        if (section.Contains("amd64", StringComparison.OrdinalIgnoreCase)) return true;
+        return !sections.ContainsKey(section + ".NTamd64");
+    }
+
+    private static int InfDecorationScore(string section) =>
+        section.Contains("amd64", StringComparison.OrdinalIgnoreCase) ? 3 :
+        section.Contains(".nt", StringComparison.OrdinalIgnoreCase) ? 2 : 1;
+
+    private static int CatalogDecorationScore(string name) =>
+        name.Contains("amd64", StringComparison.OrdinalIgnoreCase) ? 3 :
+        name.Contains(".nt", StringComparison.OrdinalIgnoreCase) ? 2 : 1;
 
     private static bool IsApplicableInfSection(string section, string baseName)
     {
@@ -513,13 +869,26 @@ public sealed class WindowsMediaPreparer
         File.Exists(Path.Combine(root, "sources", "boot.wim")) && File.Exists(Path.Combine(root, "sources", "install.wim")) &&
         File.Exists(Path.Combine(root, "boot", "bcd")) && File.Exists(Path.Combine(root, "efi", "microsoft", "boot", "bcd"));
 
-    private static void EnsureStagingSpace(string stagingRoot, BootableIsoInfo info)
+    private static void EnsureStagingSpace(string stagingRoot, BootableIsoInfo info, WindowsIsoSelection selection)
     {
         var root = Path.GetPathRoot(Path.GetFullPath(stagingRoot))!;
         var available = new DriveInfo(root).AvailableFreeSpace;
-        var estimated = info.TotalBytes * 2 + 8L * 1024 * 1024 * 1024;
+        var driverRoots = selection.DriverFolders
+            .Concat(selection.DriverFiles.Select(path => Path.GetDirectoryName(path) ?? ""))
+            .Where(path => path.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var driverBytes = driverRoots.Aggregate(0L, (total, path) =>
+        {
+            var bytes = CalculateDirectoryBytes(path);
+            return total > long.MaxValue - bytes ? long.MaxValue : total + bytes;
+        });
+        var mediaBytes = info.TotalBytes > (long.MaxValue - 12L * 1024 * 1024 * 1024) / 2
+            ? long.MaxValue
+            : info.TotalBytes * 2 + 12L * 1024 * 1024 * 1024;
+        var estimated = mediaBytes > long.MaxValue - driverBytes ? long.MaxValue : mediaBytes + driverBytes;
         if (available < estimated)
-            throw new InvalidOperationException($"Local staging needs approximately {FormatBytes(estimated)}, but only {FormatBytes(available)} is available on {root}.");
+            throw new InvalidOperationException($"Local Windows staging needs approximately {FormatBytes(estimated)}, including {FormatBytes(driverBytes)} of selected driver content, but only {FormatBytes(available)} is available on {root}. Free system-drive space or remove old caches under %LOCALAPPDATA%\\LaptopQAUsbBuilder before trying again.");
     }
 
     private static void MakeWritable(string path)
