@@ -53,7 +53,7 @@ public partial class MainWindow : Window
     private double _activityProgressStart;
     private double _activityProgressEnd;
     private string _activityName = "Transfer";
-    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.47"}";
+    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.48"}";
     private const string MainPartitionDragFormat = "LaptopQaUsbBuilder.MainPartition";
     private const string ScriptRunnerName = "LaptopQA-RunScripts.cmd";
     private const string ScriptCleanupName = "LaptopQA-Cleanup.ps1";
@@ -660,13 +660,17 @@ public partial class MainWindow : Window
         var root = document.Root!;
         var settings = new XElement(unattend + "settings", new XAttribute("pass", "windowsPE"));
         var component = new XElement(unattend + "component", new XAttribute("name", "Microsoft-Windows-Setup"), new XAttribute("processorArchitecture", "amd64"), new XAttribute("publicKeyToken", "31bf3856ad364e35"), new XAttribute("language", "neutral"), new XAttribute("versionScope", "nonSxS"));
-        var disk = $"SELECT DISK={setup.TargetDisk}\r\nCLEAN\r\nCONVERT GPT\r\nCREATE PARTITION EFI SIZE={setup.EfiSizeMb}\r\nFORMAT QUICK FS=FAT32 LABEL=\"{setup.EfiLabel}\"\r\nASSIGN LETTER={setup.EfiLetter}\r\nCREATE PARTITION MSR SIZE={setup.MsrSizeMb}\r\nCREATE PARTITION PRIMARY\r\nSHRINK MINIMUM={setup.WindowsShrinkMb}\r\nFORMAT QUICK FS=NTFS LABEL=\"{setup.WindowsLabel}\"\r\nASSIGN LETTER={setup.WindowsLetter}\r\nCREATE PARTITION PRIMARY\r\nFORMAT QUICK FS=NTFS LABEL=\"{setup.RecoveryLabel}\"\r\nASSIGN LETTER={setup.RecoveryLetter}\r\nSET ID=\"de94bba4-06d1-4d40-a16a-bfd50179d6ac\"\r\nGPT ATTRIBUTES=0x8000000000000001";
+        var firstDiskpart = $"SELECT DISK={setup.TargetDisk}&echo:CLEAN&echo:CONVERT GPT&echo:CREATE PARTITION EFI SIZE={setup.EfiSizeMb}&echo:FORMAT QUICK FS=FAT32 LABEL=\"{setup.EfiLabel}\"&echo:ASSIGN LETTER={setup.EfiLetter}&echo:CREATE PARTITION MSR SIZE={setup.MsrSizeMb}&echo:CREATE PARTITION PRIMARY";
+        var secondDiskpart = $"SHRINK MINIMUM={setup.WindowsShrinkMb}&echo:FORMAT QUICK FS=NTFS LABEL=\"{setup.WindowsLabel}\"&echo:ASSIGN LETTER={setup.WindowsLetter}&echo:CREATE PARTITION PRIMARY&echo:FORMAT QUICK FS=NTFS LABEL=\"{setup.RecoveryLabel}\"&echo:ASSIGN LETTER={setup.RecoveryLetter}";
+        var thirdDiskpart = "SET ID=\"de94bba4-06d1-4d40-a16a-bfd50179d6ac\"&echo:GPT ATTRIBUTES=0x8000000000000001";
         var commands = new XElement(unattend + "RunSynchronous");
         var order = 1;
         if (setup.PromptBeforeInstall)
             commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Confirm Windows installation"), new XElement(unattend + "Path", $"cmd.exe /c choice /C YN /N /M \\\"Windows Setup will erase Disk {setup.TargetDisk} and install Windows. Continue?\\\" & if errorlevel 2 exit /b 1")));
-        commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Prepare GPT Windows partitions"), new XElement(unattend + "Path", $"cmd.exe /c (echo {disk.Replace("\r\n", "&echo ")}) > X:\\diskpart.txt")));
-        commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order), new XElement(unattend + "Path", "diskpart.exe /s X:\\diskpart.txt")));
+        commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Write GPT partition script"), new XElement(unattend + "Path", $"cmd.exe /c \\\">\\\"X:\\diskpart.txt\\\" (echo:{firstDiskpart})")));
+        commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Add Windows and Recovery partitions"), new XElement(unattend + "Path", $"cmd.exe /c \\\">>\\\"X:\\diskpart.txt\\\" (echo:{secondDiskpart})")));
+        commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Mark the Recovery partition"), new XElement(unattend + "Path", $"cmd.exe /c \\\">>\\\"X:\\diskpart.txt\\\" (echo:{thirdDiskpart})")));
+        commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order), new XElement(unattend + "Description", "Run DiskPart"), new XElement(unattend + "Path", "cmd.exe /c \\\"diskpart.exe /s \\\"X:\\diskpart.txt\\\" >\\\"X:\\diskpart.log\\\" 2>&1\\\"")));
         component.Add(commands);
         var imageInstall = new XElement(unattend + "ImageInstall",
             new XElement(unattend + "OSImage",
