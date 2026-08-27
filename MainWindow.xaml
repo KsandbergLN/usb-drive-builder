@@ -102,7 +102,6 @@
                     <StackPanel Orientation="Horizontal">
                         <Button x:Name="ConfigButton" Content="&#x2630;" Click="Config_Click" FontSize="23" FontWeight="Normal" Foreground="{DynamicResource ThemeText}" Background="Transparent" Width="40" Padding="2" Margin="0,0,8,0" ToolTip="Settings"/>
                         <TextBlock Text="USB Drive Builder" FontSize="32" FontWeight="Light"/>
-                        <TextBlock Text=" USB Drive Builder" FontSize="32" FontWeight="Light" Foreground="{DynamicResource ThemeMuted}"/>
                     </StackPanel>
                     <TextBlock x:Name="SubtitleText" Text="Prepare standardized support media safely and consistently" Margin="0,2,0,0" Foreground="{DynamicResource ThemeMuted}" FontSize="13"/>
                 </StackPanel>
