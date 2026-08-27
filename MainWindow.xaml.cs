@@ -53,7 +53,7 @@ public partial class MainWindow : Window
     private double _activityProgressStart;
     private double _activityProgressEnd;
     private string _activityName = "Transfer";
-    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.44"}";
+    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.45"}";
     private const string MainPartitionDragFormat = "LaptopQaUsbBuilder.MainPartition";
     private const string ScriptRunnerName = "LaptopQA-RunScripts.cmd";
     private const string ScriptCleanupName = "LaptopQA-Cleanup.ps1";
@@ -1670,10 +1670,12 @@ public partial class MainWindow : Window
         PartitionPreview.RowDefinitions.Clear();
         if (disks.Count == 0)
         {
+            NoDriveSelectedText.Visibility = Visibility.Visible;
             foreach (var partition in _partitions) partition.CalculatedSizeText = null;
             PartitionLayoutNote.Text = "Each selected disk will use an MBR partition table and UEFI-only Windows boot media.";
             return;
         }
+        NoDriveSelectedText.Visibility = Visibility.Collapsed;
 
         var fixedSize = _partitions.Where(p => !p.IsRemaining)
             .Sum(p => PartitionConfig.TryParseSize(p.SizeText, out var bytes) ? bytes : 0);

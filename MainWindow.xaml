@@ -190,6 +190,7 @@
                             <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                             <TextBlock x:Name="PartitionLayoutTitle" Style="{StaticResource SectionTitle}" Text="Partition Layout" Margin="0,0,0,5"/>
                             <Grid x:Name="PartitionPreview" Grid.Row="1" Margin="0,1" MinHeight="62"/>
+                            <TextBlock x:Name="NoDriveSelectedText" Grid.Row="1" Text="NO DRIVE SELECTED" FontSize="26" FontWeight="SemiBold" Foreground="{DynamicResource ThemeMuted}" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
                             <TextBlock x:Name="PartitionLayoutNote" Grid.Row="2" Text="Each selected disk will use an MBR partition table and UEFI-only Windows boot media." Style="{StaticResource Caption}" Margin="2,3,0,0"/>
                         </Grid></Border>
                 </Grid>

@@ -9,7 +9,7 @@ This is an operations handoff for technicians. It does not describe how the appl
 ## Current release
 
 - Application: USB Drive Builder
-- Release: 2.0.44
+- Release: 2.0.45
 - Platform: Windows 10/11, 64-bit
 - Launch: Run the newest `USB Drive Builder vX.Y.Z.exe` from the `dist` folder
 - Permissions: Windows administrator approval is required
