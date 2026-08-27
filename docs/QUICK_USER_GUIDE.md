@@ -40,7 +40,6 @@ To change the layout, edit the partition rows on the main screen. Use **+** to a
 
 These settings are used only when scripts are selected without a supplied `Autounattend.xml`; a supplied XML keeps its own Windows Setup settings. **Target disk** is the internal disk number to erase, and **Install partition** is where Windows is applied (normally partition `3`). **EFI MB** and **MSR MB** set the EFI System and Microsoft Reserved partition sizes. **Shrink MB** reserves that many MB for the Recovery partition. The three label fields name the internal volumes, and **Letters (EFI / Win / Rec)** are temporary drive letters used while Setup creates them. **Edition** selects the Windows image name from the ISO. **Prompt before erasing/installing** adds a Yes/No safety prompt before internal-disk installation. **Allow unsigned drivers** only enables DISM `/ForceUnsigned` for driver servicing and does not bypass Secure Boot or Windows signature policy.
 
-**Cache location** controls the local folder used for media preparation, driver-pack extraction, driver-payload expansion, and temporary staging. It defaults to `C:\Cache` and can be changed in Config to another absolute folder. Application logs remain under `%LOCALAPPDATA%\LaptopQAUsbBuilder\Logs`.
 
 ## 4. Add content
 
@@ -65,7 +64,7 @@ When you select an ISO, choose the Windows edition. Windows 11 Pro is selected a
 
 The Scripts manager accepts all file types and keeps its list open for repeated additions from different locations. Remove deletes the highlighted entry, Clear empties the list, and Close applies it; duplicate filenames from separate locations are not allowed because all files share one destination. All selected files are copied into `sources\$OEM$\$$\Setup\Scripts` after the Windows media is copied. CMD, BAT, PowerShell, VBS, JS, and WSF files execute sequentially in listed order; XML and every other format are treated as supporting files that scripts can reference with `%~dp0`. The app modifies only the USB copy of a selected `Autounattend.xml`, adding a synchronous `specialize` command after any existing commands. If no XML was selected, it creates a minimal `Autounattend.xml`. Windows Setup runs the recognized scripts as `SYSTEM` before OOBE. After they finish, every selected file and the generated runner/cleanup files delete automatically. Original source files are not changed.
 
-The ISO partition must be NTFS, use a fixed size of at least 5 GB, and be large enough for the prepared contents. The app keeps only the chosen Windows edition, exports it with maximum WIM compression, prepares it on local storage, and caches the result so all queued USBs—and matching later builds—reuse the same media. Maximum compression saves USB and cache space but can make the initial preparation take longer. Cached media is stored in the configured cache folder's `MediaCache` subfolder (default `C:\Cache\MediaCache`) and may be deleted while the app is closed. The FAT32 `DELL DIAG` partition remains diagnostics-only and is not required for Windows boot. Bootable ISO support is intended for supported Dell-compatible removable USB flash sticks with native NTFS UEFI support; fixed-media external hard disks are not supported as boot targets. Only one bootable ISO partition is supported per USB drive.
+The ISO partition must be NTFS, use a fixed size of at least 5 GB, and be large enough for the prepared contents. The app keeps only the chosen Windows edition, exports it with maximum WIM compression, prepares it on local storage, and caches the result so all queued USBs—and matching later builds—reuse the same media. Maximum compression saves USB and cache space but can make the initial preparation take longer. Cached media is stored at `%LOCALAPPDATA%\LaptopQAUsbBuilder\MediaCache` and may be deleted while the app is closed. The FAT32 `DELL DIAG` partition remains diagnostics-only and is not required for Windows boot. Bootable ISO support is intended for supported Dell-compatible removable USB flash sticks with native NTFS UEFI support; fixed-media external hard disks are not supported as boot targets. Only one bootable ISO partition is supported per USB drive.
 
 The USB itself uses MBR, with no active partition or installed legacy MBR boot program. Select its UEFI entry in the Dell boot menu; Windows Setup then installs Windows to a GPT internal system disk. Secure Boot still depends on the selected ISO's signatures and laptop firmware policy.
 
@@ -103,7 +102,7 @@ For a successful drive, safely eject it in Windows before removing it. If a driv
 | Incomplete driver package | Re-extract the original driver package and preserve every file referenced by its INF. The warning names the INF and missing files discovered during the current preflight. |
 | Compressed driver pack cannot be extracted | Use an intact, non-password-protected ZIP or CAB containing INF driver packages. The source archive is never modified. |
 | Driver injection fails | Confirm the folder contains extracted INF packages, ensure enough free space exists on the Windows system drive, and review the build log for the DISM error. |
-| DISM error `0x80070070` | The Windows system drive ran out of space. Close the app and remove unneeded `MediaCache` or other disposable cache folders under the configured cache folder, then retry. |
+| DISM error `0x80070070` | The Windows system drive ran out of space. Close the app and remove unneeded `MediaCache` or other disposable cache folders under `%LOCALAPPDATA%\LaptopQAUsbBuilder`, then retry. |
 
 ## Logs
 
@@ -112,3 +111,5 @@ Build and crash logs are stored at:
 `%LOCALAPPDATA%\LaptopQAUsbBuilder\Logs`
 
 Logs may include source filenames and line numbers for troubleshooting, but they do not include the developer's local build or OneDrive path.
+
+undefined

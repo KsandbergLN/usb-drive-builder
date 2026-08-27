@@ -53,7 +53,7 @@ public partial class MainWindow : Window
     private double _activityProgressStart;
     private double _activityProgressEnd;
     private string _activityName = "Transfer";
-    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.55"}";
+    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.56"}";
     private const string MainPartitionDragFormat = "LaptopQaUsbBuilder.MainPartition";
     private const string ScriptRunnerName = "LaptopQA-RunScripts.cmd";
     private const string ScriptCleanupName = "LaptopQA-Cleanup.ps1";
@@ -79,7 +79,7 @@ public partial class MainWindow : Window
         {
             if (!_isBuilding && !_isPreflighting)
             {
-                CleanupTemporaryCaches(_preferences.CacheRoot);
+                CleanupTemporaryCaches();
                 return;
             }
             e.Cancel = true;
@@ -88,9 +88,9 @@ public partial class MainWindow : Window
         };
     }
 
-    private static void CleanupTemporaryCaches(string? configuredRoot)
+    private static void CleanupTemporaryCaches()
     {
-        var cacheRoot = NormalizeCacheRoot(configuredRoot);
+        var cacheRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LaptopQAUsbBuilder");
         foreach (var name in new[] { "MediaCache", "DriverPackCache", "DriverPayloadCache" })
         {
             var path = Path.Combine(cacheRoot, name);
@@ -295,7 +295,7 @@ public partial class MainWindow : Window
                     partition.ForceUnsignedDrivers);
                 var preparer = new WindowsMediaPreparer(
                     message => { SetNonTransferActivity(message); AddActivity(message); },
-                    Log, MountIsoAsync, DismountIsoAsync, NormalizeCacheRoot(_preferences.CacheRoot));
+                    Log, MountIsoAsync, DismountIsoAsync);
                 var prepared = await preparer.PrepareAsync(partition.IsoSource!, isoInfo, selection);
                 partition.PreparedMediaPath = prepared.MediaPath;
                 partition.ExtractedIsoBytes = prepared.TotalBytes;
@@ -1440,23 +1440,6 @@ public partial class MainWindow : Window
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "LaptopQAUsbBuilder", "preferences.json");
 
-    private static string NormalizeCacheRoot(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return @"C:\Cache";
-        try
-        {
-            var full = Path.GetFullPath(value.Trim());
-            var root = Path.GetPathRoot(full);
-            return string.Equals(full, root, StringComparison.OrdinalIgnoreCase)
-                ? root!
-                : full.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        }
-        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or IOException)
-        {
-            return @"C:\Cache";
-        }
-    }
-
     private AppPreferences LoadPreferences()
     {
         try
@@ -1464,7 +1447,6 @@ public partial class MainWindow : Window
             if (!File.Exists(PreferencesPath)) return new AppPreferences();
             var result = JsonSerializer.Deserialize<AppPreferences>(File.ReadAllText(PreferencesPath), _jsonOptions) ?? new AppPreferences();
             result.Language = Localization.Resolve(result.Language).Code; result.Theme = ThemeService.Normalize(result.Theme);
-            result.CacheRoot = NormalizeCacheRoot(result.CacheRoot);
             return result;
         }
         catch { return new AppPreferences(); }
@@ -1910,7 +1892,7 @@ public partial class MainWindow : Window
     private void Config_Click(object sender, RoutedEventArgs e)
     {
         var originalLanguage = _preferences.Language;
-        var dialog = new ConfigWindow(_defaultPartitions, _preferences.Language, _preferences.Theme, _preferences.ForceUnsignedDrivers, _preferences.CacheRoot, _preferences.WindowsSetup) { Owner = this };
+        var dialog = new ConfigWindow(_defaultPartitions, _preferences.Language, _preferences.Theme, _preferences.ForceUnsignedDrivers, _preferences.WindowsSetup) { Owner = this };
         if (dialog.ShowDialog() != true)
         {
             Localization.ApplyCulture(originalLanguage);
@@ -1919,7 +1901,6 @@ public partial class MainWindow : Window
         _defaultPartitions = dialog.Result.Select(p => p.Clone()).ToList();
         _preferences.Language = dialog.SelectedLanguage;
         _preferences.Theme = dialog.SelectedTheme;
-        _preferences.CacheRoot = dialog.SelectedCacheRoot;
         _preferences.ForceUnsignedDrivers = dialog.ForceUnsignedDrivers;
         _preferences.WindowsSetup = dialog.WindowsSetup;
         SaveDefaultPartitionConfig();

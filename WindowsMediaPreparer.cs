@@ -12,16 +12,14 @@ public sealed class WindowsMediaPreparer
     private readonly Action<string> _log;
     private readonly Func<string, Task<string>> _mountIso;
     private readonly Func<string, Task> _dismountIso;
-    private readonly string _cacheRoot;
 
     public WindowsMediaPreparer(Action<string> activity, Action<string> log,
-        Func<string, Task<string>> mountIso, Func<string, Task> dismountIso, string cacheRoot)
+        Func<string, Task<string>> mountIso, Func<string, Task> dismountIso)
     {
         _activity = activity;
         _log = log;
         _mountIso = mountIso;
         _dismountIso = dismountIso;
-        _cacheRoot = cacheRoot;
     }
 
     public async Task<PreparedWindowsMedia> PrepareAsync(string isoPath, BootableIsoInfo info, WindowsIsoSelection selection)
@@ -39,10 +37,11 @@ public sealed class WindowsMediaPreparer
             ValidateDriverPackages(selection);
         }
         var cacheKey = await CreateCacheKeyAsync(isoPath, selection);
-        var mediaCacheRoot = Path.Combine(_cacheRoot, "MediaCache", cacheKey);
-        var cachedMedia = Path.Combine(mediaCacheRoot, "media");
-        var completeMarker = Path.Combine(mediaCacheRoot, ".complete");
-        var rejectionReport = Path.Combine(mediaCacheRoot, "driver-rejections.json");
+        var cacheRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "LaptopQAUsbBuilder", "MediaCache", cacheKey);
+        var cachedMedia = Path.Combine(cacheRoot, "media");
+        var completeMarker = Path.Combine(cacheRoot, ".complete");
+        var rejectionReport = Path.Combine(cacheRoot, "driver-rejections.json");
         if (File.Exists(completeMarker) && IsCompleteWindowsMedia(cachedMedia))
         {
             _activity($"Using cached {selection.EditionName} Windows media.");
@@ -51,7 +50,8 @@ public sealed class WindowsMediaPreparer
                 LoadDriverRejections(rejectionReport));
         }
 
-        var stagingParent = Path.Combine(_cacheRoot, "Staging");
+        var stagingParent = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "LaptopQAUsbBuilder", "Staging");
         Directory.CreateDirectory(stagingParent);
         EnsureStagingSpace(stagingParent, info, selection);
         var stagingRoot = Path.Combine(stagingParent, Guid.NewGuid().ToString("N"));
@@ -93,8 +93,8 @@ public sealed class WindowsMediaPreparer
             if (!IsCompleteWindowsMedia(mediaRoot))
                 throw new InvalidOperationException("Prepared Windows media verification failed before caching.");
 
-            DeleteDirectoryTree(mediaCacheRoot);
-            Directory.CreateDirectory(mediaCacheRoot);
+            DeleteDirectoryTree(cacheRoot);
+            Directory.CreateDirectory(cacheRoot);
             if (!await TryMoveCompletedCacheAsync(mediaRoot, cachedMedia, "Windows media"))
                 throw new IOException("Windows media preparation completed, but its cache directory remained locked after several retries.");
             File.WriteAllText(completeMarker,
@@ -327,7 +327,8 @@ public sealed class WindowsMediaPreparer
 
         _activity($"Checking compressed driver pack {Path.GetFileName(archivePath)}...");
         var archiveHash = (await HashFileAsync(archivePath)).ToLowerInvariant();
-        var cacheParent = Path.Combine(_cacheRoot, "DriverPackCache");
+        var cacheParent = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "LaptopQAUsbBuilder", "DriverPackCache");
         Directory.CreateDirectory(cacheParent);
         var cacheRoot = Path.Combine(cacheParent, archiveHash);
         var completeMarker = Path.Combine(cacheRoot, ".complete");
@@ -468,7 +469,8 @@ public sealed class WindowsMediaPreparer
 
         _activity($"Expanding {expansions.Count} compressed driver payload file(s) from {Path.GetFileName(sourceRoot)}...");
         var sourceManifest = CreateDriverManifest(sourceRoot).ToLowerInvariant();
-        var cacheParent = Path.Combine(_cacheRoot, "DriverPayloadCache");
+        var cacheParent = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "LaptopQAUsbBuilder", "DriverPayloadCache");
         Directory.CreateDirectory(cacheParent);
         var cacheRoot = Path.Combine(cacheParent, sourceManifest);
         var completeMarker = Path.Combine(cacheRoot, ".complete");

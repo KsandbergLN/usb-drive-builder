@@ -7,7 +7,6 @@ public sealed class AppPreferences
 {
     public string Language { get; set; } = "en-US";
     public string Theme { get; set; } = "Light";
-    public string CacheRoot { get; set; } = @"C:\Cache";
     public bool ForceUnsignedDrivers { get; set; }
     public WindowsSetupConfig WindowsSetup { get; set; } = new();
 }
