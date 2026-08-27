@@ -1,4 +1,4 @@
-# Laptop QA USB Drive Builder — Quick User Guide
+# USB Drive Builder — Quick User Guide
 
 Use this guide when you need to create one or more standardized QA/support USB drives.
 
@@ -8,7 +8,7 @@ Use this guide when you need to create one or more standardized QA/support USB d
 
 ## 1. Start the app
 
-Open the newest `Laptop QA USB Drive Builder vX.Y.Z.exe` in the `dist` folder. Approve the Windows administrator prompt.
+Open the newest `USB Drive Builder vX.Y.Z.exe` in the `dist` folder. Approve the Windows administrator prompt.
 
 ## 2. Select the target drive(s)
 

@@ -1,17 +1,17 @@
-# Laptop QA USB Drive Builder — Technician Handoff
+# USB Drive Builder — Technician Handoff
 
 ## Purpose
 
-Laptop QA USB Drive Builder prepares standardized support USB media for laptop QA and support work. It creates an MBR-partitioned USB drive with UEFI-only Windows boot media, formats the requested partitions, copies selected content, and verifies the resulting labels and file systems.
+USB Drive Builder prepares standardized support USB media for laptop QA and support work. It creates an MBR-partitioned USB drive with UEFI-only Windows boot media, formats the requested partitions, copies selected content, and verifies the resulting labels and file systems.
 
 This is an operations handoff for technicians. It does not describe how the application is built or maintained.
 
 ## Current release
 
-- Application: Laptop QA USB Drive Builder
-- Release: 2.0.35
+- Application: USB Drive Builder
+- Release: 2.0.36
 - Platform: Windows 10/11, 64-bit
-- Launch: Run the newest `Laptop QA USB Drive Builder vX.Y.Z.exe` from the `dist` folder
+- Launch: Run the newest `USB Drive Builder vX.Y.Z.exe` from the `dist` folder
 - Permissions: Windows administrator approval is required
 
 ## Standard output

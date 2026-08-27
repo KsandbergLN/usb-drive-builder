@@ -1,8 +1,8 @@
-![Laptop QA USB Drive Builder application](docs/images/laptop-qa-usb-drive-builder.png)
+![USB Drive Builder application](docs/images/laptop-qa-usb-drive-builder.png)
 
-# Laptop QA USB Drive Builder
+# USB Drive Builder
 
-**Laptop QA USB Drive Builder** is a Windows desktop tool for IT technicians who need to turn one or more USB drives into consistent, ready-to-use laptop support media. It replaces repetitive manual disk preparation with a guided workflow that erases approved USB disks, creates a configurable MBR partition layout, formats each volume, and copies the correct diagnostic, Windows setup, and support content to its destination.
+**USB Drive Builder** is a Windows desktop tool for IT technicians who need to turn one or more USB drives into consistent, ready-to-use laptop support media. It replaces repetitive manual disk preparation with a guided workflow that erases approved USB disks, creates a configurable MBR partition layout, formats each volume, and copies the correct diagnostic, Windows setup, and support content to its destination.
 
 The app is designed for repeatable bench workflows. Technicians can save a standard layout, preview how it will fit each selected drive, attach different files and folders to individual partitions, and build several USB drives in a sequential queue. Before and after every build, the app validates the target disk and resulting partition layout, while activity and file logs provide a clear record for troubleshooting.
 
@@ -85,7 +85,7 @@ Application confirmations, warnings, errors, completion messages, and tooltips u
 
 ## Run
 
-Double-click the newest **Laptop QA USB Drive Builder vX.Y.Z.exe** in the `dist` folder and accept the administrator prompt. Disk partitioning requires elevation. The WPF application performs storage operations without displaying a PowerShell window.
+Double-click the newest **USB Drive Builder vX.Y.Z.exe** in the `dist` folder and accept the administrator prompt. Disk partitioning requires elevation. The WPF application performs storage operations without displaying a PowerShell window.
 
 The version appears in the app footer and executable metadata. Historical versioned executables can coexist in the shared `dist` folder.
 

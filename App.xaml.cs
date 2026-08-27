@@ -35,6 +35,6 @@ public partial class App : Application
         var path = Path.Combine(folder, $"Crash-{DateTime.Now:yyyyMMdd-HHmmss}.log");
         File.WriteAllText(path, LogSanitizer.SanitizeException(exception));
         MessageBox.Show($"The application encountered an error.\n\nA crash log was saved to:\n{path}\n\n{exception.Message}",
-            "Laptop QA USB Drive Builder", MessageBoxButton.OK, MessageBoxImage.Error);
+            "USB Drive Builder", MessageBoxButton.OK, MessageBoxImage.Error);
     }
 }
