@@ -63,7 +63,7 @@ Content selections stay with their partition when the partition is reordered. Ho
 
 ## Progress and activity
 
-The Activity card shows a whole-drive progress bar and the current operation. During a file or folder transfer it displays byte-based completion percentage for that operation. Time estimates are intentionally omitted because formatting, ISO mounting, antivirus activity, small-file overhead, and changing USB speeds made them unreliable.
+The Activity card shows a determinate current-activity progress bar plus total queue progress. During a file or folder transfer the current bar displays byte-based completion percentage for that operation. Time estimates are intentionally omitted because formatting, ISO mounting, antivirus activity, small-file overhead, and changing USB speeds made them unreliable.
 
 ## Selecting and building USB drives
 

@@ -69,7 +69,7 @@ The USB itself uses MBR, with no active partition or installed legacy MBR boot p
 2. Type `ERASE` in the confirmation box.
 3. Select **Build USB Queue**.
 
-The app immediately shows **Preparing build** with an indeterminate progress bar while it checks the selected disks, source paths, capacity, and prepares or retrieves cached Windows media. If preflight succeeds, it proceeds directly into the USB queue without another confirmation or driver-report prompt. Safety and preparation failures still stop before anything is erased.
+The app immediately shows **Preparing build** with a determinate current-activity progress bar while it checks the selected disks, source paths, capacity, and prepares or retrieves cached Windows media. During a queued build, a second bar shows total queue progress. If preflight succeeds, it proceeds directly into the USB queue without another confirmation or driver-report prompt. Safety and preparation failures still stop before anything is erased.
 
 The build is blocked before erasure if the complete selected content—including extracted ISO files and other files or folders assigned to that partition—is estimated not to fit.
 

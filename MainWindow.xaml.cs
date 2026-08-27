@@ -53,7 +53,7 @@ public partial class MainWindow : Window
     private double _activityProgressStart;
     private double _activityProgressEnd;
     private string _activityName = "Transfer";
-    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.52"}";
+    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.53"}";
     private const string MainPartitionDragFormat = "LaptopQaUsbBuilder.MainPartition";
     private const string ScriptRunnerName = "LaptopQA-RunScripts.cmd";
     private const string ScriptCleanupName = "LaptopQA-Cleanup.ps1";
@@ -268,7 +268,9 @@ public partial class MainWindow : Window
             try
             {
                 SetStatus("Preparing Windows media", "#B36A13");
+                BuildProgress.Value = 0;
                 var isoInfo = await InspectBootableIsoAsync(partition.IsoSource!);
+                BuildProgress.Value = 25;
                 if (partition.IsoEditionIndex is not { } editionIndex ||
                     isoInfo.Editions.FirstOrDefault(item => item.Index == editionIndex) is not { } edition)
                     throw new InvalidOperationException("The selected Windows edition is no longer present in this ISO. Select the ISO again and choose an edition.");
@@ -297,6 +299,7 @@ public partial class MainWindow : Window
                 var prepared = await preparer.PrepareAsync(partition.IsoSource!, isoInfo, selection);
                 partition.PreparedMediaPath = prepared.MediaPath;
                 partition.ExtractedIsoBytes = prepared.TotalBytes;
+                BuildProgress.Value = 100;
                 if (prepared.DriverRejections.Count > 0)
                 {
                     AddActivity($"Driver servicing continued with {prepared.DriverRejections.Count} skipped package(s). See the build log for details.");
@@ -323,6 +326,7 @@ public partial class MainWindow : Window
                 return;
             }
         }
+        BuildProgress.Value = 100;
         UpdatePartitionPreview(queuedDisks);
         var capacityWarnings = GetContentCapacityWarnings(queuedDisks);
         SetStatus(Localization.Text(_preferences.Language, "Ready"), "#147A4B");
@@ -338,7 +342,10 @@ public partial class MainWindow : Window
         CurrentEtaText.Text = "Current activity: Preparing drive...";
         QueueEtaText.Visibility = Visibility.Collapsed;
         InitializeEtaTracking(0, queuedDisks.Count);
-        BuildProgress.IsIndeterminate = true;
+        BuildProgress.IsIndeterminate = false;
+        BuildProgress.Value = 0;
+        QueueProgress.IsIndeterminate = false;
+        QueueProgress.Value = 0;
 
         var succeeded = 0;
         var failures = new List<string>();
@@ -347,7 +354,9 @@ public partial class MainWindow : Window
             var disk = queuedDisks[queueIndex];
             StartQueueDiskEstimate();
             SetStatus($"Building {queueIndex + 1} of {queuedDisks.Count}", "#B36A13");
-            BuildProgress.IsIndeterminate = true;
+            BuildProgress.IsIndeterminate = false;
+            BuildProgress.Value = 0;
+            QueueProgress.Value = 100d * queueIndex / Math.Max(1, queuedDisks.Count);
             SetNonTransferActivity("Preparing drive...");
             try
             {
@@ -355,7 +364,7 @@ public partial class MainWindow : Window
                 AddActivity("Clearing existing partitions and creating the requested layout.");
                 var result = await CreatePartitionsAsync(disk);
                 BuildProgress.IsIndeterminate = false;
-                BuildProgress.Value = 35;
+                BuildProgress.Value = 100;
                 foreach (var partition in _partitions) AddActivity($"Created {partition.Name} ({partition.SizeText}, {partition.FileSystem}).");
                 var copyPartitions = _partitions.Select((partition, index) => (partition, index))
                     .Where(item => item.partition.HasAnyContent).ToList();
@@ -364,15 +373,16 @@ public partial class MainWindow : Window
                     var (partition, partitionIndex) = copyPartitions[copyIndex];
                     if (partitionIndex >= result.Letters.Count || string.IsNullOrWhiteSpace(result.Letters[partitionIndex]))
                         throw new InvalidOperationException($"Windows did not assign a drive letter to {partition.Name}.");
-                    var start = 35 + 60 * copyIndex / Math.Max(1, copyPartitions.Count);
-                    var end = 35 + 60 * (copyIndex + 1) / Math.Max(1, copyPartitions.Count);
-                    await CopyPartitionSourcesAsync(partition, $"{result.Letters[partitionIndex]}:\\", start, end);
+                    BuildProgress.Value = 0;
+                    await CopyPartitionSourcesAsync(partition, $"{result.Letters[partitionIndex]}:\\", 0, 100);
                 }
-                if (copyPartitions.Count == 0) BuildProgress.Value = 95;
+                if (copyPartitions.Count == 0) BuildProgress.Value = 100;
                 AddActivity("Verifying partition labels and file systems.");
                 SetNonTransferActivity("Verifying partitions...");
+                BuildProgress.Value = 0;
                 await VerifyPartitionsAsync(disk.Number, disk.UniqueId);
                 BuildProgress.Value = 100;
+                QueueProgress.Value = 100d * (queueIndex + 1) / Math.Max(1, queuedDisks.Count);
                 succeeded++;
                 CompleteQueueDiskEstimate();
                 AddActivity($"Disk {disk.Number} completed and verified.");
@@ -387,6 +397,7 @@ public partial class MainWindow : Window
             }
         }
         BuildProgress.IsIndeterminate = false;
+        QueueProgress.Value = 100;
         CompleteEtaTracking();
         SetBuildingState(false);
         ConfirmText.Clear();
@@ -1230,6 +1241,8 @@ public partial class MainWindow : Window
             BuildProgress.Value = progressStart + (progressEnd - progressStart) * fraction;
             CurrentEtaText.Text = $"Current activity: {activityName} ({fraction:P0})";
         }
+        if (queueTotal > 0)
+            QueueProgress.Value = Math.Clamp(100d * queueCopied / queueTotal, 0, 100);
     }
 
     private void CompleteEtaTracking()
@@ -1364,7 +1377,10 @@ public partial class MainWindow : Window
         if (preflighting)
         {
             SetStatus("Preparing build", "#B36A13");
-            BuildProgress.IsIndeterminate = true;
+            BuildProgress.IsIndeterminate = false;
+            BuildProgress.Value = 0;
+            QueueProgress.IsIndeterminate = false;
+            QueueProgress.Value = 0;
             CurrentEtaText.Text = "Current activity: Checking targets, sources, and ISO media...";
             QueueEtaText.Visibility = Visibility.Collapsed;
             AddActivity("Preparing build: checking targets, sources, and ISO media before erasure.");
@@ -1373,6 +1389,8 @@ public partial class MainWindow : Window
         {
             BuildProgress.IsIndeterminate = false;
             BuildProgress.Value = 0;
+            QueueProgress.IsIndeterminate = false;
+            QueueProgress.Value = 0;
             CurrentEtaText.Text = "Current activity: Waiting";
             SetStatus(Localization.Text(_preferences.Language, "Ready"), "#147A4B");
         }
