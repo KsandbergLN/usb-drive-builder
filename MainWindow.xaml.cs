@@ -53,7 +53,7 @@ public partial class MainWindow : Window
     private double _activityProgressStart;
     private double _activityProgressEnd;
     private string _activityName = "Transfer";
-    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.50"}";
+    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.51"}";
     private const string MainPartitionDragFormat = "LaptopQaUsbBuilder.MainPartition";
     private const string ScriptRunnerName = "LaptopQA-RunScripts.cmd";
     private const string ScriptCleanupName = "LaptopQA-Cleanup.ps1";
@@ -649,7 +649,7 @@ public partial class MainWindow : Window
             new XAttribute(wcm + "action", "add"),
             new XElement(unattend + "Order", nextOrder),
             new XElement(unattend + "Description", "Run USB Drive Builder Windows Setup scripts"),
-            new XElement(unattend + "Path", $"cmd.exe /d /c \"%WINDIR%\\Setup\\Scripts\\{ScriptRunnerName}\"")));
+            new XElement(unattend + "Path", $"cmd.exe /d /c \"if exist C:\\Windows\\Setup\\Scripts\\{ScriptRunnerName} (call C:\\Windows\\Setup\\Scripts\\{ScriptRunnerName}) else (echo {ScriptRunnerName} missing>C:\\Windows\\Temp\\LaptopQA-Runner-Missing.log) & exit /b 0\"")));
 
         document.Declaration = null;
         return "<?xml version=\"1.0\" encoding=\"utf-8\"?>" + Environment.NewLine + document;
@@ -666,7 +666,11 @@ public partial class MainWindow : Window
         var commands = new XElement(unattend + "RunSynchronous");
         var order = 1;
         if (setup.PromptBeforeInstall)
-            commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Confirm Windows installation"), new XElement(unattend + "Path", $"cmd.exe /c choice /C YN /N /D N /T 30 /M \\\"Windows Setup is ready to reimage this computer. This will erase all data on Disk {setup.TargetDisk} and install a fresh copy of Windows. Select Y to begin, or N to return without making changes.\\\" & if errorlevel 2 exit /b 1")));
+        {
+            var promptScript = $@"cmd.exe /c "">""X:\confirm-reimage.vbs"" (echo:answer = MsgBox(^""Windows Setup is ready to reimage this computer.^"" ^& vbCrLf ^& vbCrLf ^& ^""This will erase all data on Disk {setup.TargetDisk} and install a fresh copy of Windows.^"" ^& vbCrLf ^& vbCrLf ^& ^""Select Yes to begin, or No to return without making changes.^"", vbYesNo + vbQuestion + vbDefaultButton2, ^""Ready to Reimage^""^)&echo:If answer ^<^> vbYes Then&echo:WScript.Echo ^""Reimage cancelled by user.^""&echo:WScript.Quit 1&echo:End If)";
+            commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Create reimage confirmation prompt"), new XElement(unattend + "Path", promptScript)));
+            commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Confirm Windows installation"), new XElement(unattend + "Path", "cscript.exe //nologo //E:vbscript \"X:\\confirm-reimage.vbs\"")));
+        }
         commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Write GPT partition script"), new XElement(unattend + "Path", $"cmd.exe /c \">\"X:\\diskpart.txt\" (echo:{firstDiskpart})")));
         commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Add Windows and Recovery partitions"), new XElement(unattend + "Path", $"cmd.exe /c \">>\"X:\\diskpart.txt\" (echo:{secondDiskpart})")));
         commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Mark the Recovery partition"), new XElement(unattend + "Path", $"cmd.exe /c \">>\"X:\\diskpart.txt\" (echo:{thirdDiskpart})")));
