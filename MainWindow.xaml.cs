@@ -53,7 +53,7 @@ public partial class MainWindow : Window
     private double _activityProgressStart;
     private double _activityProgressEnd;
     private string _activityName = "Transfer";
-    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.51"}";
+    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.52"}";
     private const string MainPartitionDragFormat = "LaptopQaUsbBuilder.MainPartition";
     private const string ScriptRunnerName = "LaptopQA-RunScripts.cmd";
     private const string ScriptCleanupName = "LaptopQA-Cleanup.ps1";
@@ -671,7 +671,7 @@ public partial class MainWindow : Window
             commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Create reimage confirmation prompt"), new XElement(unattend + "Path", promptScript)));
             commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Confirm Windows installation"), new XElement(unattend + "Path", "cscript.exe //nologo //E:vbscript \"X:\\confirm-reimage.vbs\"")));
         }
-        commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Write GPT partition script"), new XElement(unattend + "Path", $"cmd.exe /c \">\"X:\\diskpart.txt\" (echo:{firstDiskpart})")));
+        commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Write GPT partition script"), new XElement(unattend + "Path", $"cmd.exe /c \">>\"X:\\diskpart.txt\" (echo:{firstDiskpart})")));
         commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Add Windows and Recovery partitions"), new XElement(unattend + "Path", $"cmd.exe /c \">>\"X:\\diskpart.txt\" (echo:{secondDiskpart})")));
         commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Mark the Recovery partition"), new XElement(unattend + "Path", $"cmd.exe /c \">>\"X:\\diskpart.txt\" (echo:{thirdDiskpart})")));
         commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order), new XElement(unattend + "Description", "Run DiskPart"), new XElement(unattend + "Path", "cmd.exe /c \"diskpart.exe /s \"X:\\diskpart.txt\" >>\"X:\\diskpart.log\" || ( type \"X:\\diskpart.log\" & echo diskpart encountered an error. & pause & exit /b 1 )\"")));
