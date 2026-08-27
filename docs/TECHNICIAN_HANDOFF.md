@@ -24,7 +24,11 @@ The built drive uses MBR and, by default, has this visible layout:
 | `Win11 Boot` | 20 GB | NTFS | Windows setup/support files, optional `Autounattend.xml`, and optional bootable UEFI Windows media |
 | `IT SUPP` | `*` (remaining space) | exFAT | Support tools and other technician content |
 
-The default layout can be changed in Settings. A valid MBR layout must contain 1–4 partitions and exactly one `*` remaining-space partition.
+The default layout can be changed in Config. A valid MBR layout must contain 1–4 partitions and exactly one `*` remaining-space partition.
+
+### Generated Windows Setup defaults
+
+The **Generated Windows Setup defaults** section is used only when scripts are selected without a supplied `Autounattend.xml`. When an XML is supplied, the app preserves that file's Windows Setup settings instead. **Target disk** is the internal disk number passed to DiskPart and Windows Setup. **Install partition** identifies the Windows image destination; the standard generated layout uses partition `3`. **EFI MB** and **MSR MB** set the EFI System and Microsoft Reserved partition sizes. **Shrink MB** is the amount reserved for the Recovery partition. The EFI, Windows, and Recovery label fields name those volumes; the EFI/Win/Rec letter fields provide temporary Setup drive letters. **Edition** must match an available image name in the selected ISO. **Prompt before erasing/installing** adds a Yes/No prompt before internal-disk reimaging. **Allow unsigned drivers** applies only to DISM `/ForceUnsigned` and cannot override Windows or Secure Boot signature enforcement.
 
 ## Before starting a build
 

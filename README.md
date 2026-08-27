@@ -37,6 +37,24 @@ Default editing is locked initially to prevent accidental changes. Unlock it wit
 
 Partitions can be added with the green `+`, removed with their red `-`, and reordered using the two-bar drag handles. Config removal and reordering controls are disabled while defaults are locked.
 
+### Generated Windows Setup defaults
+
+The **Generated Windows Setup defaults** section is used only when scripts are selected and no `Autounattend.xml` was supplied. If you provide an XML file, its existing Windows Setup settings are preserved and these generated-file fields are not used. The fields mean:
+
+| Setting | Meaning |
+|---|---|
+| Target disk | Internal disk number passed to DiskPart and Windows Setup. This is normally `0`, but it must match the disk that should be erased on the computer being installed. |
+| Install partition | Partition number receiving the Windows image. With the standard generated layout, partition `3` is the Windows partition. |
+| EFI MB | Size of the EFI System Partition, in MB. |
+| MSR MB | Size of the Microsoft Reserved partition, in MB. |
+| Shrink MB | Space reserved from the Windows partition for the Recovery partition, in MB. |
+| EFI / Windows / Recovery label | Volume labels assigned to those internal-disk partitions. |
+| EFI / Win / Rec letters | Temporary drive letters used by Windows Setup while it creates and formats the partitions. |
+| Edition | Windows image name requested from the selected ISO; it should match one of that ISO's available editions. |
+| Prompt before erasing/installing | Adds a Yes/No prompt in Windows Setup before the internal disk is erased and Windows is installed. |
+
+The **Allow unsigned drivers** option applies only to optional DISM driver injection and adds `/ForceUnsigned`; it does not override Windows or Secure Boot policy. The lock icon protects the default partition rows and generated settings from accidental edits until unlocked.
+
 ## Adding content
 
 Every partition row has a muted, theme-aware green **Add** button stacked above a muted red **Clear** button with no content heading. Add opens an app-themed content manager that remains open while multiple content types are selected, sizes itself to the actions available for that file system, and closes only when **Close** is chosen. Clear removes all content assigned to that partition. Green text to their right summarizes attached types—`AUXML`, `ISO`, `Folder`, `Files`, `Drivers`, and `Scripts`—without expanding the row into separate buttons. Folder contents are merged into the destination partition root, while selected files are copied directly to that root.

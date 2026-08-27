@@ -36,6 +36,10 @@ Every fixed size must include `MB` or `GB`. A missing or malformed unit turns th
 
 To change the layout, edit the partition rows on the main screen. Use **+** to add a row, **−** to remove one, and the drag handle to reorder rows. Use the three-bar menu in the upper-left to edit and save the defaults restored by **Defaults**.
 
+### Generated Windows Setup settings
+
+These settings are used only when scripts are selected without a supplied `Autounattend.xml`; a supplied XML keeps its own Windows Setup settings. **Target disk** is the internal disk number to erase, and **Install partition** is where Windows is applied (normally partition `3`). **EFI MB** and **MSR MB** set the EFI System and Microsoft Reserved partition sizes. **Shrink MB** reserves that many MB for the Recovery partition. The three label fields name the internal volumes, and **Letters (EFI / Win / Rec)** are temporary drive letters used while Setup creates them. **Edition** selects the Windows image name from the ISO. **Prompt before erasing/installing** adds a Yes/No safety prompt before internal-disk installation. **Allow unsigned drivers** only enables DISM `/ForceUnsigned` for driver servicing and does not bypass Secure Boot or Windows signature policy.
+
 ## 4. Add content
 
 On the partition row that should receive content, select **Add**. The themed chooser provides:
