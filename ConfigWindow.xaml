@@ -187,7 +187,7 @@
                         <TextBlock Text="Only applies when driver injection is selected. Windows or Secure Boot may still refuse to load unsigned drivers." Foreground="{DynamicResource ThemeMuted}" FontSize="11" TextWrapping="Wrap" Margin="22,3,0,0"/>
                     </StackPanel>
                 </Border>
-                <TextBlock x:Name="SizeHelpText" Text="Size entries: 50 MB, 20 GB, or * for all remaining space. Use * for exactly one partition in any position. FAT32 labels allow 11 characters; exFAT allows 15; NTFS allows 32." Foreground="{DynamicResource ThemeMuted}" TextWrapping="Wrap"/>
+                <TextBlock x:Name="SizeHelpText" Text="Size entries: 50 MB, 20 GB, or * for all remaining space. Use * for exactly one partition in any position. Volume-label limits: FAT32 up to 11 characters; exFAT up to 15; NTFS up to 32." Foreground="{DynamicResource ThemeMuted}" TextWrapping="Wrap"/>
             </StackPanel>
             <Grid Grid.Row="4" Margin="0,18,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="110"/><ColumnDefinition Width="110"/></Grid.ColumnDefinitions>
                 <Button x:Name="CancelButton" Grid.Column="1" Content="Cancel" Click="Cancel_Click" Margin="8,0"/>

@@ -345,7 +345,7 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
         DialogTitleText.Text = "Configuration"; DialogSubtitleText.Text = "Configure default partitions and Windows image servicing.";
         LanguageLabel.Text = T("Language"); ThemeLabel.Text = T("Theme"); DefaultPartitionsLabel.Text = "Default partitions"; RemainingHint.Text = T("Remaining Hint");
         VolumeLabelColumn.Header = T("Volume label"); SizeColumn.Header = T("Size Header"); FormatColumn.Header = T("Format");
-        SizeHelpText.Text = T("Size Help") + "  FAT32: 11, exFAT: 15, NTFS: 32.";
+        SizeHelpText.Text = T("Size Help") + "  Volume-label limits: FAT32 up to 11 characters; exFAT up to 15; NTFS up to 32.";
         CancelButton.Content = T("Cancel"); SaveButton.Content = T("Save");
     }
 }
