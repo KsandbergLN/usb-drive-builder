@@ -34,8 +34,28 @@ public partial class ScriptSourcesDialog : Window
         if (dialog.ShowDialog(this) != true) return;
         PickerLocationStore.Set("Scripts", Path.GetDirectoryName(dialog.FileNames[0]));
 
+        AddPaths(dialog.FileNames);
+    }
+
+    private void AddFolder_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFolderDialog { Title = "Select a folder of Windows Setup scripts and supporting files", Multiselect = false, InitialDirectory = PickerLocationStore.Get("ScriptsFolder") };
+        if (dialog.ShowDialog(this) != true) return;
+        PickerLocationStore.Set("ScriptsFolder", dialog.FolderName);
+        try
+        {
+            AddPaths(Directory.EnumerateFiles(dialog.FolderName, "*", SearchOption.AllDirectories));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            MessageBox.Show($"The selected folder could not be read.\n\n{ex.Message}", "Scripts folder unavailable", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private void AddPaths(IEnumerable<string> paths)
+    {
         var problems = new List<string>();
-        foreach (var path in dialog.FileNames)
+        foreach (var path in paths)
         {
             if (_sources.Contains(path, StringComparer.OrdinalIgnoreCase)) continue;
             var name = Path.GetFileName(path);
