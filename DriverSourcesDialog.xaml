@@ -34,8 +34,8 @@
             </Grid>
 
             <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,12,0,12">
+                <Button Content="Add Files" Click="AddFiles_Click" Background="{DynamicResource AddButtonBackground}" Foreground="{DynamicResource AddButtonForeground}" Margin="0,0,8,0"/>
                 <Button Content="Add Folder" Click="AddFolder_Click" Background="{DynamicResource AddButtonBackground}" Foreground="{DynamicResource AddButtonForeground}" Margin="0,0,8,0"/>
-                <Button Content="Add Driver Files" Click="AddFiles_Click" Background="{DynamicResource AddButtonBackground}" Foreground="{DynamicResource AddButtonForeground}" Margin="0,0,8,0"/>
                 <Button Content="Remove" Click="Remove_Click" Background="{DynamicResource ClearButtonBackground}" Foreground="{DynamicResource ClearButtonForeground}" Margin="0,0,8,0"/>
                 <Button Content="Clear" Click="Clear_Click" Background="{DynamicResource ClearButtonBackground}" Foreground="{DynamicResource ClearButtonForeground}"/>
             </StackPanel>
