@@ -27,17 +27,19 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
     public string SelectedLanguage { get; private set; }
     public string SelectedTheme { get; private set; }
     public bool ForceUnsignedDrivers { get; private set; }
+    public WindowsSetupConfig WindowsSetup { get; private set; }
     public bool CanAddDefaultPartitions => !_defaultsLocked && _items.Count < 4;
     public bool CanRemoveDefaultPartitions => !_defaultsLocked && _items.Count > 1;
     public bool DefaultsEditable => !_defaultsLocked;
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    public ConfigWindow(IEnumerable<PartitionConfig> current, string language, string theme, bool forceUnsignedDrivers)
+    public ConfigWindow(IEnumerable<PartitionConfig> current, string language, string theme, bool forceUnsignedDrivers, WindowsSetupConfig? windowsSetup = null)
     {
         InitializeComponent();
         SelectedLanguage = Localization.Resolve(language).Code;
         SelectedTheme = ThemeService.Normalize(theme);
         ForceUnsignedDrivers = forceUnsignedDrivers;
+        WindowsSetup = windowsSetup?.Clone() ?? new WindowsSetupConfig();
         _originalTheme = SelectedTheme;
         _items = new ObservableCollection<PartitionConfig>(current.Select(p => p.Clone()));
         PartitionGrid.ItemsSource = _items;
@@ -48,6 +50,11 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
         LanguagePicker.SelectedItem = Localization.Resolve(SelectedLanguage);
         RebuildThemeChoices();
         ForceUnsignedDriversCheckBox.IsChecked = ForceUnsignedDrivers;
+        TargetDiskTextBox.Text = WindowsSetup.TargetDisk.ToString(); InstallPartitionTextBox.Text = WindowsSetup.InstallPartition.ToString();
+        EfiSizeTextBox.Text = WindowsSetup.EfiSizeMb.ToString(); MsrSizeTextBox.Text = WindowsSetup.MsrSizeMb.ToString(); WindowsShrinkTextBox.Text = WindowsSetup.WindowsShrinkMb.ToString();
+        EfiLabelTextBox.Text = WindowsSetup.EfiLabel; WindowsLabelTextBox.Text = WindowsSetup.WindowsLabel; RecoveryLabelTextBox.Text = WindowsSetup.RecoveryLabel;
+        EfiLetterTextBox.Text = WindowsSetup.EfiLetter; WindowsLetterTextBox.Text = WindowsSetup.WindowsLetter; RecoveryLetterTextBox.Text = WindowsSetup.RecoveryLetter;
+        EditionTextBox.Text = WindowsSetup.Edition; ProductKeyTextBox.Text = WindowsSetup.ProductKey; PromptBeforeInstallCheckBox.IsChecked = WindowsSetup.PromptBeforeInstall;
         ApplyLanguage();
         ThemeService.Apply(this, SelectedTheme);
         Loaded += (_, _) => ThemeService.Apply(this, SelectedTheme);
@@ -247,8 +254,21 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
         SelectedLanguage = (LanguagePicker.SelectedItem as LanguageOption)?.Code ?? "en-US";
         SelectedTheme = (ThemePicker.SelectedItem as ThemeOption)?.Key ?? "Light";
         ForceUnsignedDrivers = ForceUnsignedDriversCheckBox.IsChecked == true;
+        WindowsSetup = new WindowsSetupConfig
+        {
+            TargetDisk = ParseInt(TargetDiskTextBox.Text, WindowsSetup.TargetDisk),
+            InstallPartition = ParseInt(InstallPartitionTextBox.Text, WindowsSetup.InstallPartition),
+            EfiSizeMb = ParseInt(EfiSizeTextBox.Text, WindowsSetup.EfiSizeMb),
+            MsrSizeMb = ParseInt(MsrSizeTextBox.Text, WindowsSetup.MsrSizeMb),
+            WindowsShrinkMb = ParseInt(WindowsShrinkTextBox.Text, WindowsSetup.WindowsShrinkMb),
+            EfiLabel = EfiLabelTextBox.Text.Trim(), WindowsLabel = WindowsLabelTextBox.Text.Trim(), RecoveryLabel = RecoveryLabelTextBox.Text.Trim(),
+            EfiLetter = EfiLetterTextBox.Text.Trim(), WindowsLetter = WindowsLetterTextBox.Text.Trim(), RecoveryLetter = RecoveryLetterTextBox.Text.Trim(),
+            ProductKey = ProductKeyTextBox.Text.Trim(), Edition = EditionTextBox.Text.Trim(), PromptBeforeInstall = PromptBeforeInstallCheckBox.IsChecked == true
+        };
         DialogResult = true;
     }
+
+    private static int ParseInt(string text, int fallback) => int.TryParse(text, out var value) && value > 0 ? value : fallback;
 
     private bool Validate(out string message)
     {
@@ -328,6 +348,25 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
         SizeHelpText.Text = T("Size Help") + "  FAT32: 11, exFAT: 15, NTFS: 32.";
         CancelButton.Content = T("Cancel"); SaveButton.Content = T("Save");
     }
+}
+
+public sealed class WindowsSetupConfig
+{
+    public int TargetDisk { get; set; } = 0;
+    public int InstallPartition { get; set; } = 3;
+    public int EfiSizeMb { get; set; } = 1500;
+    public int MsrSizeMb { get; set; } = 16;
+    public int WindowsShrinkMb { get; set; } = 1000;
+    public string EfiLabel { get; set; } = "System";
+    public string WindowsLabel { get; set; } = "Windows";
+    public string RecoveryLabel { get; set; } = "Recovery";
+    public string EfiLetter { get; set; } = "S";
+    public string WindowsLetter { get; set; } = "W";
+    public string RecoveryLetter { get; set; } = "R";
+    public string Edition { get; set; } = "Windows 11 Pro";
+    public string ProductKey { get; set; } = "VK7JG-NPHTM-C97JM-9MPGT-3V66T";
+    public bool PromptBeforeInstall { get; set; } = true;
+    public WindowsSetupConfig Clone() => (WindowsSetupConfig)MemberwiseClone();
 }
 
 public sealed class PartitionConfig

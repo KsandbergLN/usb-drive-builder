@@ -157,6 +157,30 @@
             <StackPanel Grid.Row="3" Margin="2,10,0,0">
                 <Border Background="{DynamicResource ThemeCard}" BorderBrush="{DynamicResource ThemeStroke}" BorderThickness="1" CornerRadius="10" Padding="11,8" Margin="0,0,0,8">
                     <StackPanel>
+                        <TextBlock Text="Generated Windows Setup defaults" FontWeight="SemiBold"/>
+                        <TextBlock Text="Used only when scripts are selected without a supplied Autounattend.xml. The generated file prepares the internal disk as GPT." Foreground="{DynamicResource ThemeMuted}" FontSize="11" TextWrapping="Wrap" Margin="0,3,0,7"/>
+                        <WrapPanel>
+                            <StackPanel Margin="0,0,12,5"><TextBlock Text="Target disk"/><TextBox x:Name="TargetDiskTextBox" Width="55" Height="28"/></StackPanel>
+                            <StackPanel Margin="0,0,12,5"><TextBlock Text="Install partition"/><TextBox x:Name="InstallPartitionTextBox" Width="75" Height="28"/></StackPanel>
+                            <StackPanel Margin="0,0,12,5"><TextBlock Text="EFI MB"/><TextBox x:Name="EfiSizeTextBox" Width="70" Height="28"/></StackPanel>
+                            <StackPanel Margin="0,0,12,5"><TextBlock Text="MSR MB"/><TextBox x:Name="MsrSizeTextBox" Width="65" Height="28"/></StackPanel>
+                            <StackPanel Margin="0,0,12,5"><TextBlock Text="Shrink MB"/><TextBox x:Name="WindowsShrinkTextBox" Width="75" Height="28"/></StackPanel>
+                        </WrapPanel>
+                        <WrapPanel>
+                            <StackPanel Margin="0,0,12,5"><TextBlock Text="EFI label"/><TextBox x:Name="EfiLabelTextBox" Width="95" Height="28"/></StackPanel>
+                            <StackPanel Margin="0,0,12,5"><TextBlock Text="Windows label"/><TextBox x:Name="WindowsLabelTextBox" Width="105" Height="28"/></StackPanel>
+                            <StackPanel Margin="0,0,12,5"><TextBlock Text="Recovery label"/><TextBox x:Name="RecoveryLabelTextBox" Width="105" Height="28"/></StackPanel>
+                            <StackPanel Margin="0,0,12,5"><TextBlock Text="Letters (EFI / Win / Rec)"/><TextBox x:Name="EfiLetterTextBox" Width="34" Height="28"/><TextBox x:Name="WindowsLetterTextBox" Width="34" Height="28" Margin="38,-28,0,0"/><TextBox x:Name="RecoveryLetterTextBox" Width="34" Height="28" Margin="76,-28,0,0"/></StackPanel>
+                        </WrapPanel>
+                        <WrapPanel>
+                            <StackPanel Margin="0,0,12,5"><TextBlock Text="Edition"/><TextBox x:Name="EditionTextBox" Width="145" Height="28"/></StackPanel>
+                            <StackPanel Margin="0,0,12,5"><TextBlock Text="Product key"/><TextBox x:Name="ProductKeyTextBox" Width="230" Height="28"/></StackPanel>
+                            <CheckBox x:Name="PromptBeforeInstallCheckBox" Content="Prompt before erasing/installing" VerticalAlignment="Bottom" Margin="0,0,0,10"/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+                <Border Background="{DynamicResource ThemeCard}" BorderBrush="{DynamicResource ThemeStroke}" BorderThickness="1" CornerRadius="10" Padding="11,8" Margin="0,0,0,8">
+                    <StackPanel>
                         <CheckBox x:Name="ForceUnsignedDriversCheckBox" Content="Allow unsigned drivers (DISM /ForceUnsigned)" FontWeight="SemiBold"/>
                         <TextBlock Text="Only applies when driver injection is selected. Windows or Secure Boot may still refuse to load unsigned drivers." Foreground="{DynamicResource ThemeMuted}" FontSize="11" TextWrapping="Wrap" Margin="22,3,0,0"/>
                     </StackPanel>

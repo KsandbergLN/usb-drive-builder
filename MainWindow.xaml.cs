@@ -216,7 +216,7 @@ public partial class MainWindow : Window
             try
             {
                 var answerFileSource = partition.AutounattendSource ?? partition.FolderXmlSource;
-                partition.PreparedAutounattendXml = BuildScriptAutounattend(answerFileSource);
+                partition.PreparedAutounattendXml = BuildScriptAutounattend(answerFileSource, answerFileSource is null ? _preferences.WindowsSetup : null);
                 AddActivity(string.IsNullOrWhiteSpace(answerFileSource)
                     ? $"Prepared a generated Autounattend.xml to run scripts for {partition.Name}."
                     : $"Prepared the selected Autounattend.xml with the script runner for {partition.Name}.");
@@ -555,7 +555,7 @@ public partial class MainWindow : Window
         AddActivity($"Windows Setup scripts and automatic cleanup added to sources\\$OEM$\\$$\\Setup\\Scripts on {partition.Name}.");
     }
 
-    private static string BuildScriptAutounattend(string? sourcePath)
+    private static string BuildScriptAutounattend(string? sourcePath, WindowsSetupConfig? generatedSetup = null)
     {
         XNamespace unattend = "urn:schemas-microsoft-com:unattend";
         XNamespace wcm = "http://schemas.microsoft.com/WMIConfig/2002/State";
@@ -566,6 +566,7 @@ public partial class MainWindow : Window
             document = new XDocument(new XElement(unattend + "unattend",
                 new XAttribute(XNamespace.Xmlns + "wcm", wcm.NamespaceName),
                 new XAttribute(XNamespace.Xmlns + "xsi", xsi.NamespaceName)));
+            if (generatedSetup is not null) AddGeneratedWindowsSetup(document, generatedSetup, unattend, wcm);
         }
         else
         {
@@ -626,6 +627,30 @@ public partial class MainWindow : Window
 
         document.Declaration = null;
         return "<?xml version=\"1.0\" encoding=\"utf-8\"?>" + Environment.NewLine + document;
+    }
+
+    private static void AddGeneratedWindowsSetup(XDocument document, WindowsSetupConfig setup, XNamespace unattend, XNamespace wcm)
+    {
+        var root = document.Root!;
+        var settings = new XElement(unattend + "settings", new XAttribute("pass", "windowsPE"));
+        var component = new XElement(unattend + "component", new XAttribute("name", "Microsoft-Windows-Setup"), new XAttribute("processorArchitecture", "amd64"), new XAttribute("publicKeyToken", "31bf3856ad364e35"), new XAttribute("language", "neutral"), new XAttribute("versionScope", "nonSxS"));
+        var disk = $"SELECT DISK={setup.TargetDisk}\r\nCLEAN\r\nCONVERT GPT\r\nCREATE PARTITION EFI SIZE={setup.EfiSizeMb}\r\nFORMAT QUICK FS=FAT32 LABEL=\"{setup.EfiLabel}\"\r\nASSIGN LETTER={setup.EfiLetter}\r\nCREATE PARTITION MSR SIZE={setup.MsrSizeMb}\r\nCREATE PARTITION PRIMARY\r\nSHRINK MINIMUM={setup.WindowsShrinkMb}\r\nFORMAT QUICK FS=NTFS LABEL=\"{setup.WindowsLabel}\"\r\nASSIGN LETTER={setup.WindowsLetter}\r\nCREATE PARTITION PRIMARY\r\nFORMAT QUICK FS=NTFS LABEL=\"{setup.RecoveryLabel}\"\r\nASSIGN LETTER={setup.RecoveryLetter}\r\nSET ID=\"de94bba4-06d1-4d40-a16a-bfd50179d6ac\"\r\nGPT ATTRIBUTES=0x8000000000000001";
+        var commands = new XElement(unattend + "RunSynchronous");
+        var order = 1;
+        if (setup.PromptBeforeInstall)
+            commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Confirm Windows installation"), new XElement(unattend + "Path", $"cmd.exe /c choice /C YN /N /M \\\"Windows Setup will erase Disk {setup.TargetDisk} and install Windows. Continue?\\\" & if errorlevel 2 exit /b 1")));
+        commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Prepare GPT Windows partitions"), new XElement(unattend + "Path", $"cmd.exe /c (echo {disk.Replace("\r\n", "&echo ")}) > X:\\diskpart.txt")));
+        commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order), new XElement(unattend + "Path", "diskpart.exe /s X:\\diskpart.txt")));
+        component.Add(commands);
+        var imageInstall = new XElement(unattend + "ImageInstall",
+            new XElement(unattend + "OSImage",
+                new XElement(unattend + "InstallFrom",
+                    new XElement(unattend + "MetaData", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Key", "/IMAGE/NAME"), new XElement(unattend + "Value", setup.Edition))),
+                new XElement(unattend + "InstallTo", new XElement(unattend + "DiskID", setup.TargetDisk), new XElement(unattend + "PartitionID", setup.InstallPartition))));
+        component.Add(imageInstall);
+        component.Add(new XElement(unattend + "UserData", new XElement(unattend + "ProductKey", new XElement(unattend + "Key", setup.ProductKey), new XElement(unattend + "WillShowUI", "OnError")), new XElement(unattend + "AcceptEula", "true")));
+        component.Add(new XElement(unattend + "UseConfigurationSet", "true"));
+        settings.Add(component); root.AddFirst(settings);
     }
 
     private static string BuildScriptRunner(IEnumerable<string> scriptPaths)
@@ -1800,7 +1825,7 @@ public partial class MainWindow : Window
     private void Config_Click(object sender, RoutedEventArgs e)
     {
         var originalLanguage = _preferences.Language;
-        var dialog = new ConfigWindow(_defaultPartitions, _preferences.Language, _preferences.Theme, _preferences.ForceUnsignedDrivers) { Owner = this };
+        var dialog = new ConfigWindow(_defaultPartitions, _preferences.Language, _preferences.Theme, _preferences.ForceUnsignedDrivers, _preferences.WindowsSetup) { Owner = this };
         if (dialog.ShowDialog() != true)
         {
             Localization.ApplyCulture(originalLanguage);
@@ -1810,6 +1835,7 @@ public partial class MainWindow : Window
         _preferences.Language = dialog.SelectedLanguage;
         _preferences.Theme = dialog.SelectedTheme;
         _preferences.ForceUnsignedDrivers = dialog.ForceUnsignedDrivers;
+        _preferences.WindowsSetup = dialog.WindowsSetup;
         SaveDefaultPartitionConfig();
         SavePreferences();
         Localization.ApplyCulture(_preferences.Language);
