@@ -176,7 +176,6 @@
                         </WrapPanel>
                         <WrapPanel>
                             <StackPanel Margin="0,0,12,5"><TextBlock Text="Edition"/><TextBox x:Name="EditionTextBox" Width="145" Height="28"/></StackPanel>
-                            <StackPanel Margin="0,0,12,5"><TextBlock Text="Product key"/><TextBox x:Name="ProductKeyTextBox" Width="230" Height="28"/></StackPanel>
                             <CheckBox x:Name="PromptBeforeInstallCheckBox" Content="Prompt before erasing/installing" VerticalAlignment="Bottom" Margin="0,0,0,10"/>
                         </WrapPanel>
                     </StackPanel>
