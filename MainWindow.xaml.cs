@@ -23,6 +23,7 @@ public partial class MainWindow : Window
     private readonly JsonSerializerOptions _jsonOptions = new() { PropertyNameCaseInsensitive = true };
     private bool _isBuilding;
     private bool _isPreflighting;
+    private CancellationTokenSource? _buildCancellation;
     private bool _updatingPartitionGrid;
     private PartitionConfig? _draggedPartition;
     private Point _partitionDragStart;
@@ -52,7 +53,7 @@ public partial class MainWindow : Window
     private double _activityProgressStart;
     private double _activityProgressEnd;
     private string _activityName = "Transfer";
-    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.41"}";
+    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.42"}";
     private const string MainPartitionDragFormat = "LaptopQaUsbBuilder.MainPartition";
     private const string ScriptRunnerName = "LaptopQA-RunScripts.cmd";
     private const string ScriptCleanupName = "LaptopQA-Cleanup.ps1";
@@ -124,7 +125,13 @@ public partial class MainWindow : Window
         ActivityList.Items.Clear();
         SetPreflightState(true);
         await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.Render);
+        _buildCancellation = new CancellationTokenSource();
         try { await BuildCoreAsync(); }
+        catch (OperationCanceledException)
+        {
+            AddActivity("Build cancelled by user.");
+            SetStatus("✕ Cancelled", "#AE3338");
+        }
         catch (Exception ex)
         {
             Log($"Unexpected build error: {LogSanitizer.SanitizeException(ex)}");
@@ -132,7 +139,7 @@ public partial class MainWindow : Window
             MessageBox.Show($"The build could not continue.\n\n{ex.Message}\n\nLog: {_logPath}",
                 "Build failed", MessageBoxButton.OK, MessageBoxImage.Error);
         }
-        finally { SetPreflightState(false); }
+        finally { _buildCancellation?.Dispose(); _buildCancellation = null; SetPreflightState(false); SetBuildingState(false); }
     }
 
     private async Task BuildCoreAsync()
@@ -364,7 +371,7 @@ public partial class MainWindow : Window
         CompleteEtaTracking();
         SetBuildingState(false);
         ConfirmText.Clear();
-        SetStatus(failures.Count == 0 ? "Complete" : "Queue finished", failures.Count == 0 ? "#147A4B" : "#AE3338");
+        SetStatus(failures.Count == 0 ? "✓ Complete" : "✕ Queue finished with errors", failures.Count == 0 ? "#147A4B" : "#AE3338");
         var failureText = failures.Count == 0 ? "" : $"\n\nFailures:\n{string.Join("\n", failures)}";
         MessageBox.Show($"Queue finished.\n\nSucceeded: {succeeded}\nFailed: {failures.Count}{failureText}\n\nLog: {_logPath}",
             "USB queue complete", MessageBoxButton.OK, failures.Count == 0 ? MessageBoxImage.Information : MessageBoxImage.Warning);
@@ -648,7 +655,7 @@ public partial class MainWindow : Window
                     new XElement(unattend + "MetaData", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Key", "/IMAGE/NAME"), new XElement(unattend + "Value", setup.Edition))),
                 new XElement(unattend + "InstallTo", new XElement(unattend + "DiskID", setup.TargetDisk), new XElement(unattend + "PartitionID", setup.InstallPartition))));
         component.Add(imageInstall);
-        component.Add(new XElement(unattend + "UserData", new XElement(unattend + "ProductKey", new XElement(unattend + "Key", setup.ProductKey), new XElement(unattend + "WillShowUI", "OnError")), new XElement(unattend + "AcceptEula", "true")));
+        component.Add(new XElement(unattend + "UserData", new XElement(unattend + "AcceptEula", "true")));
         component.Add(new XElement(unattend + "UseConfigurationSet", "true"));
         settings.Add(component); root.AddFirst(settings);
     }
@@ -763,7 +770,7 @@ public partial class MainWindow : Window
         };
     }
 
-    private static async Task<string> MountIsoAsync(string isoPath)
+    private async Task<string> MountIsoAsync(string isoPath)
     {
         var escapedPath = PsQuote(isoPath);
         var mountScript = $"$path='{escapedPath}';$existing=Get-DiskImage -ImagePath $path -ErrorAction SilentlyContinue;if($existing -and $existing.Attached){{throw 'The selected ISO is already mounted. Dismount it in Windows before building.'}};try{{Mount-DiskImage -ImagePath $path -PassThru -ErrorAction Stop|Out-Null;$v=$null;for($i=0;$i -lt 20 -and -not $v;$i++){{Start-Sleep -Milliseconds 250;$v=Get-DiskImage -ImagePath $path|Get-Volume -ErrorAction SilentlyContinue|Where-Object DriveLetter|Select-Object -First 1}};if(-not $v){{throw 'Windows mounted the ISO but did not assign it a drive letter.'}};$v.DriveLetter}}catch{{Dismount-DiskImage -ImagePath $path -ErrorAction SilentlyContinue;throw}}";
@@ -776,7 +783,7 @@ public partial class MainWindow : Window
         return driveLetter;
     }
 
-    private static Task DismountIsoAsync(string isoPath) =>
+    private Task DismountIsoAsync(string isoPath) =>
         RunPowerShellAsync($"Dismount-DiskImage -ImagePath '{PsQuote(isoPath)}' -ErrorAction Stop");
 
     private async Task CopySourceAsync(string source, string destination, string name, int startProgress, int endProgress, string? excludedFile = null)
@@ -1229,7 +1236,7 @@ public partial class MainWindow : Window
         return int.TryParse(result.Trim(), out var sourceDisk) && sourceDisk == diskNumber;
     }
 
-    private static async Task<string> RunPowerShellAsync(string script)
+    private async Task<string> RunPowerShellAsync(string script)
     {
         var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
         var start = new ProcessStartInfo
@@ -1247,7 +1254,8 @@ public partial class MainWindow : Window
         using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start the Windows storage service.");
         var outputTask = process.StandardOutput.ReadToEndAsync();
         var errorTask = process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
+        try { await process.WaitForExitAsync(_buildCancellation?.Token ?? CancellationToken.None); }
+        catch (OperationCanceledException) { try { if (!process.HasExited) process.Kill(true); } catch { } throw; }
         var output = (await outputTask).Trim();
         var error = (await errorTask).Trim();
         if (process.ExitCode != 0) throw new InvalidOperationException(string.IsNullOrWhiteSpace(error) ? "Windows storage operation failed." : CleanPowerShellError(error));
@@ -1299,7 +1307,18 @@ public partial class MainWindow : Window
         DiskPicker.IsEnabled = !building; RefreshButton.IsEnabled = !building;
         MainPartitionList.IsEnabled = !building; AddPartitionButton.IsEnabled = !building; MainDefaultsButton.IsEnabled = !building;
         ConfirmText.IsEnabled = !building;
+        CancelBuildButton.Visibility = building ? Visibility.Visible : Visibility.Collapsed;
+        CancelBuildButton.IsEnabled = building;
         UpdateBuildButton();
+    }
+
+    private void CancelBuild_Click(object sender, RoutedEventArgs e)
+    {
+        if (_buildCancellation is null) return;
+        CancelBuildButton.IsEnabled = false;
+        SetNonTransferActivity("Cancelling build...");
+        AddActivity("Build cancellation requested.");
+        _buildCancellation.Cancel();
     }
 
     private void SetPreflightState(bool preflighting)

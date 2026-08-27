@@ -54,7 +54,7 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
         EfiSizeTextBox.Text = WindowsSetup.EfiSizeMb.ToString(); MsrSizeTextBox.Text = WindowsSetup.MsrSizeMb.ToString(); WindowsShrinkTextBox.Text = WindowsSetup.WindowsShrinkMb.ToString();
         EfiLabelTextBox.Text = WindowsSetup.EfiLabel; WindowsLabelTextBox.Text = WindowsSetup.WindowsLabel; RecoveryLabelTextBox.Text = WindowsSetup.RecoveryLabel;
         EfiLetterTextBox.Text = WindowsSetup.EfiLetter; WindowsLetterTextBox.Text = WindowsSetup.WindowsLetter; RecoveryLetterTextBox.Text = WindowsSetup.RecoveryLetter;
-        EditionTextBox.Text = WindowsSetup.Edition; ProductKeyTextBox.Text = WindowsSetup.ProductKey; PromptBeforeInstallCheckBox.IsChecked = WindowsSetup.PromptBeforeInstall;
+        EditionTextBox.Text = WindowsSetup.Edition; PromptBeforeInstallCheckBox.IsChecked = WindowsSetup.PromptBeforeInstall;
         ApplyLanguage();
         ThemeService.Apply(this, SelectedTheme);
         Loaded += (_, _) => ThemeService.Apply(this, SelectedTheme);
@@ -263,7 +263,7 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
             WindowsShrinkMb = ParseInt(WindowsShrinkTextBox.Text, WindowsSetup.WindowsShrinkMb),
             EfiLabel = EfiLabelTextBox.Text.Trim(), WindowsLabel = WindowsLabelTextBox.Text.Trim(), RecoveryLabel = RecoveryLabelTextBox.Text.Trim(),
             EfiLetter = EfiLetterTextBox.Text.Trim(), WindowsLetter = WindowsLetterTextBox.Text.Trim(), RecoveryLetter = RecoveryLetterTextBox.Text.Trim(),
-            ProductKey = ProductKeyTextBox.Text.Trim(), Edition = EditionTextBox.Text.Trim(), PromptBeforeInstall = PromptBeforeInstallCheckBox.IsChecked == true
+            Edition = EditionTextBox.Text.Trim(), PromptBeforeInstall = PromptBeforeInstallCheckBox.IsChecked == true
         };
         DialogResult = true;
     }
@@ -364,7 +364,6 @@ public sealed class WindowsSetupConfig
     public string WindowsLetter { get; set; } = "W";
     public string RecoveryLetter { get; set; } = "R";
     public string Edition { get; set; } = "Windows 11 Pro";
-    public string ProductKey { get; set; } = "VK7JG-NPHTM-C97JM-9MPGT-3V66T";
     public bool PromptBeforeInstall { get; set; } = true;
     public WindowsSetupConfig Clone() => (WindowsSetupConfig)MemberwiseClone();
 }

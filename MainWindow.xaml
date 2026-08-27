@@ -211,6 +211,7 @@
                         <TextBlock x:Name="ConfirmLabel" Text="Type ERASE to confirm" FontWeight="SemiBold" Margin="0,0,0,7"/>
                         <TextBox x:Name="ConfirmText" Style="{StaticResource Field}" CharacterCasing="Upper" TextChanged="ConfirmText_TextChanged" Margin="0,0,0,12"/>
                         <Button x:Name="BuildButton" Content="Build USB Queue" Click="Build_Click" Background="{DynamicResource ClearButtonBackground}" Foreground="{DynamicResource ClearButtonForeground}" Height="50" FontSize="16" IsEnabled="False"/>
+                        <Button x:Name="CancelBuildButton" Content="Cancel build" Click="CancelBuild_Click" Background="{DynamicResource ClearButtonBackground}" Foreground="{DynamicResource ClearButtonForeground}" Height="38" Margin="0,8,0,0" Visibility="Collapsed"/>
                     </StackPanel></Border>
                 </Grid>
             </Grid>
