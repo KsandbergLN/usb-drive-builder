@@ -9,6 +9,7 @@ using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
+using Microsoft.Win32;
 
 namespace LaptopQaUsbBuilder;
 
@@ -26,6 +27,7 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
     public List<PartitionConfig> Result { get; private set; } = [];
     public string SelectedLanguage { get; private set; }
     public string SelectedTheme { get; private set; }
+    public string SelectedCacheRoot { get; private set; }
     public bool ForceUnsignedDrivers { get; private set; }
     public WindowsSetupConfig WindowsSetup { get; private set; }
     public bool CanAddDefaultPartitions => !_defaultsLocked && _items.Count < 4;
@@ -33,11 +35,12 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
     public bool DefaultsEditable => !_defaultsLocked;
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    public ConfigWindow(IEnumerable<PartitionConfig> current, string language, string theme, bool forceUnsignedDrivers, WindowsSetupConfig? windowsSetup = null)
+    public ConfigWindow(IEnumerable<PartitionConfig> current, string language, string theme, bool forceUnsignedDrivers, string? cacheRoot = null, WindowsSetupConfig? windowsSetup = null)
     {
         InitializeComponent();
         SelectedLanguage = Localization.Resolve(language).Code;
         SelectedTheme = ThemeService.Normalize(theme);
+        SelectedCacheRoot = NormalizeCacheRoot(cacheRoot);
         ForceUnsignedDrivers = forceUnsignedDrivers;
         WindowsSetup = windowsSetup?.Clone() ?? new WindowsSetupConfig();
         _originalTheme = SelectedTheme;
@@ -55,6 +58,7 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
         EfiLabelTextBox.Text = WindowsSetup.EfiLabel; WindowsLabelTextBox.Text = WindowsSetup.WindowsLabel; RecoveryLabelTextBox.Text = WindowsSetup.RecoveryLabel;
         EfiLetterTextBox.Text = WindowsSetup.EfiLetter; WindowsLetterTextBox.Text = WindowsSetup.WindowsLetter; RecoveryLetterTextBox.Text = WindowsSetup.RecoveryLetter;
         EditionTextBox.Text = WindowsSetup.Edition; PromptBeforeInstallCheckBox.IsChecked = WindowsSetup.PromptBeforeInstall;
+        CacheRootTextBox.Text = SelectedCacheRoot;
         ApplyLanguage();
         ThemeService.Apply(this, SelectedTheme);
         Loaded += (_, _) => ThemeService.Apply(this, SelectedTheme);
@@ -250,9 +254,15 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
             MessageBox.Show(message, "Invalid partition settings", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
+        if (!TryNormalizeCacheRoot(CacheRootTextBox.Text, out var cacheRoot, out message))
+        {
+            MessageBox.Show(message, "Invalid cache location", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
         Result = _items.Select(p => p.Clone()).ToList();
         SelectedLanguage = (LanguagePicker.SelectedItem as LanguageOption)?.Code ?? "en-US";
         SelectedTheme = (ThemePicker.SelectedItem as ThemeOption)?.Key ?? "Light";
+        SelectedCacheRoot = cacheRoot;
         ForceUnsignedDrivers = ForceUnsignedDriversCheckBox.IsChecked == true;
         WindowsSetup = new WindowsSetupConfig
         {
@@ -269,6 +279,39 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
     }
 
     private static int ParseInt(string text, int fallback) => int.TryParse(text, out var value) && value > 0 ? value : fallback;
+
+    private static string NormalizeCacheRoot(string? value) =>
+        TryNormalizeCacheRoot(value, out var normalized, out _) ? normalized : @"C:\Cache";
+
+    private static bool TryNormalizeCacheRoot(string? value, out string normalized, out string message)
+    {
+        normalized = @"C:\Cache";
+        message = "";
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            message = "Enter a cache folder path, such as C:\\Cache.";
+            return false;
+        }
+        try
+        {
+            var full = Path.GetFullPath(value.Trim());
+            if (!Path.IsPathRooted(full))
+            {
+                message = "The cache location must be an absolute path, such as C:\\Cache.";
+                return false;
+            }
+            var root = Path.GetPathRoot(full);
+            normalized = string.Equals(full, root, StringComparison.OrdinalIgnoreCase)
+                ? root!
+                : full.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return true;
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or IOException)
+        {
+            message = $"The cache location is not valid.\n\n{ex.Message}";
+            return false;
+        }
+    }
 
     private bool Validate(out string message)
     {
@@ -302,6 +345,17 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
     }
 
     private void Cancel_Click(object sender, RoutedEventArgs e) => DialogResult = false;
+
+    private void BrowseCacheRoot_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFolderDialog
+        {
+            Title = "Select the USB Drive Builder cache folder",
+            Multiselect = false,
+            InitialDirectory = Directory.Exists(CacheRootTextBox.Text) ? CacheRootTextBox.Text : @"C:\"
+        };
+        if (dialog.ShowDialog() == true) CacheRootTextBox.Text = dialog.FolderName;
+    }
 
     protected override void OnClosing(CancelEventArgs e)
     {
