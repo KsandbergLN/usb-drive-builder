@@ -201,10 +201,8 @@
                         <TextBlock x:Name="ActivityTitle" Style="{StaticResource SectionTitle}" Text="Activity"/>
                         <ListBox x:Name="ActivityList" Grid.Row="1" BorderThickness="0" Background="Transparent" FontSize="13" Foreground="{DynamicResource ThemeMuted}" ScrollViewer.VerticalScrollBarVisibility="Auto"/>
                         <StackPanel Grid.Row="2" Margin="0,10,0,0">
-                            <TextBlock Text="Current activity progress" Foreground="{DynamicResource ThemeMuted}" FontSize="10"/>
-                            <ProgressBar x:Name="BuildProgress" Height="8" Margin="0,3,0,0" Foreground="#20B86A" Background="#D9E2DF" Minimum="0" Maximum="100" Value="0"/>
-                            <TextBlock Text="Total queue progress" Foreground="{DynamicResource ThemeMuted}" FontSize="10" Margin="0,7,0,0"/>
-                            <ProgressBar x:Name="QueueProgress" Height="8" Margin="0,3,0,0" Foreground="#20B86A" Background="#D9E2DF" Minimum="0" Maximum="100" Value="0"/>
+                            <ProgressBar x:Name="BuildProgress" Height="8" Foreground="#20B86A" Background="#D9E2DF" Minimum="0" Maximum="100" Value="0"/>
+                            <ProgressBar x:Name="QueueProgress" Height="8" Margin="0,8,0,0" Foreground="#20B86A" Background="#D9E2DF" Minimum="0" Maximum="100" Value="0"/>
                         </StackPanel>
                         <StackPanel Grid.Row="3" Margin="0,6,0,0">
                             <TextBlock x:Name="CurrentEtaText" Text="Current activity: Waiting" Foreground="{DynamicResource ThemeMuted}" FontSize="11"/>
