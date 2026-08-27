@@ -492,6 +492,14 @@ public sealed class WindowsMediaPreparer
                 var stagedExpected = Path.Combine(temporaryRoot, Path.GetRelativePath(sourceRoot, pair.Key));
                 var stagedCompressed = Path.Combine(temporaryRoot, Path.GetRelativePath(sourceRoot, pair.Value));
                 Directory.CreateDirectory(Path.GetDirectoryName(stagedExpected)!);
+                // Some vendor packages ship both the normal payload and a legacy
+                // compressed companion. Prefer the complete normal file; only
+                // expand when the expected payload is genuinely absent.
+                if (File.Exists(stagedExpected))
+                {
+                    _log($"Using existing driver payload {Path.GetFileName(stagedExpected)}; compressed companion {Path.GetFileName(pair.Value)} was not expanded.");
+                    continue;
+                }
                 await ExpandCompressedFileAsync(stagedCompressed, stagedExpected);
                 if (!File.Exists(stagedExpected))
                     throw new InvalidDataException($"Windows did not produce the expected driver payload '{Path.GetFileName(stagedExpected)}'.");

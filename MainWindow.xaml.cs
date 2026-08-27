@@ -53,7 +53,7 @@ public partial class MainWindow : Window
     private double _activityProgressStart;
     private double _activityProgressEnd;
     private string _activityName = "Transfer";
-    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.45"}";
+    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.46"}";
     private const string MainPartitionDragFormat = "LaptopQaUsbBuilder.MainPartition";
     private const string ScriptRunnerName = "LaptopQA-RunScripts.cmd";
     private const string ScriptCleanupName = "LaptopQA-Cleanup.ps1";
