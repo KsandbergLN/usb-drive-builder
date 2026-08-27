@@ -28,8 +28,9 @@ public partial class DriverSourcesDialog : Window
 
     private void AddFolder_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new OpenFolderDialog { Title = "Select a folder containing INF driver packages", Multiselect = false };
+        var dialog = new OpenFolderDialog { Title = "Select a folder containing INF driver packages", Multiselect = false, InitialDirectory = PickerLocationStore.Get("DriverFolder") };
         if (dialog.ShowDialog() != true) return;
+        PickerLocationStore.Set("DriverFolder", dialog.FolderName);
         try
         {
             if (!Directory.EnumerateFiles(dialog.FolderName, "*.inf", SearchOption.AllDirectories).Any())
@@ -54,9 +55,11 @@ public partial class DriverSourcesDialog : Window
             Title = "Select INF files or compressed driver packs",
             Filter = "Driver files and packs (*.inf;*.zip;*.cab)|*.inf;*.zip;*.cab|INF packages (*.inf)|*.inf|Compressed driver packs (*.zip;*.cab)|*.zip;*.cab",
             CheckFileExists = true,
-            Multiselect = true
+            Multiselect = true,
+            InitialDirectory = PickerLocationStore.Get("DriverFiles")
         };
         if (dialog.ShowDialog() != true) return;
+        PickerLocationStore.Set("DriverFiles", Path.GetDirectoryName(dialog.FileNames[0]));
         foreach (var path in dialog.FileNames)
         {
             var isInf = Path.GetExtension(path).Equals(".inf", StringComparison.OrdinalIgnoreCase);

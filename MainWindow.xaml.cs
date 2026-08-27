@@ -52,7 +52,7 @@ public partial class MainWindow : Window
     private double _activityProgressStart;
     private double _activityProgressEnd;
     private string _activityName = "Transfer";
-    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.37"}";
+    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.38"}";
     private const string MainPartitionDragFormat = "LaptopQaUsbBuilder.MainPartition";
     private const string ScriptRunnerName = "LaptopQA-RunScripts.cmd";
     private const string ScriptCleanupName = "LaptopQA-Cleanup.ps1";
@@ -1785,8 +1785,9 @@ public partial class MainWindow : Window
 
     private void AddFolder(ObservableCollection<string> collection)
     {
-        var dialog = new OpenFolderDialog { Title = "Select a folder whose contents will be copied", Multiselect = false };
+        var dialog = new OpenFolderDialog { Title = "Select a folder whose contents will be copied", Multiselect = false, InitialDirectory = PickerLocationStore.Get("Folder") };
         if (dialog.ShowDialog() != true) return;
+        PickerLocationStore.Set("Folder", dialog.FolderName);
         if (collection.Any(path => path.Equals(dialog.FolderName, StringComparison.OrdinalIgnoreCase)))
         {
             MessageBox.Show("That folder is already in this list.", "Folder already added", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -1899,8 +1900,9 @@ public partial class MainWindow : Window
 
     private async Task AddPartitionFilesAsync(PartitionConfig partition, Window owner)
     {
-        var dialog = new OpenFileDialog { Title = $"Select files for {partition.Name}", Filter = "All files (*.*)|*.*", CheckFileExists = true, Multiselect = true };
+        var dialog = new OpenFileDialog { Title = $"Select files for {partition.Name}", Filter = "All files (*.*)|*.*", CheckFileExists = true, Multiselect = true, InitialDirectory = PickerLocationStore.Get("Files") };
         if (dialog.ShowDialog(owner) != true) return;
+        PickerLocationStore.Set("Files", Path.GetDirectoryName(dialog.FileNames[0]));
         foreach (var path in dialog.FileNames)
             if (!partition.SourceFiles.Any(existing => existing.Equals(path, StringComparison.OrdinalIgnoreCase))) partition.SourceFiles.Add(path);
         await RefreshPartitionContentSizeAsync(partition, true); UpdateBuildButton();
@@ -1908,8 +1910,9 @@ public partial class MainWindow : Window
 
     private async Task AddPartitionFolderAsync(PartitionConfig partition, Window owner)
     {
-        var dialog = new OpenFolderDialog { Title = $"Select a folder for {partition.Name}", Multiselect = false };
+        var dialog = new OpenFolderDialog { Title = $"Select a folder for {partition.Name}", Multiselect = false, InitialDirectory = PickerLocationStore.Get("Folder") };
         if (dialog.ShowDialog(owner) != true) return;
+        PickerLocationStore.Set("Folder", dialog.FolderName);
         if (!partition.SourceFolders.Any(existing => existing.Equals(dialog.FolderName, StringComparison.OrdinalIgnoreCase))) partition.SourceFolders.Add(dialog.FolderName);
         await RefreshPartitionContentSizeAsync(partition, true); UpdateBuildButton();
     }
@@ -1917,8 +1920,9 @@ public partial class MainWindow : Window
     private async Task AddPartitionAutounattendAsync(PartitionConfig partition, Window owner)
     {
         if (partition.FileSystem != "NTFS" && !partition.HasIso) return;
-        var dialog = new OpenFileDialog { Title = $"Select Autounattend.xml for {partition.Name}", Filter = "XML files (*.xml)|*.xml|All files (*.*)|*.*", CheckFileExists = true, Multiselect = false };
+        var dialog = new OpenFileDialog { Title = $"Select Autounattend.xml for {partition.Name}", Filter = "XML files (*.xml)|*.xml|All files (*.*)|*.*", CheckFileExists = true, Multiselect = false, InitialDirectory = PickerLocationStore.Get("XML") };
         if (dialog.ShowDialog(owner) != true) return;
+        PickerLocationStore.Set("XML", Path.GetDirectoryName(dialog.FileName));
         partition.AutounattendSource = dialog.FileName;
         partition.PreparedAutounattendXml = null;
         await RefreshPartitionContentSizeAsync(partition, true); UpdateBuildButton();
@@ -1945,8 +1949,9 @@ public partial class MainWindow : Window
                 "Boot partition size", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
-        var dialog = new OpenFileDialog { Title = $"Select an ISO for {partition.Name}", Filter = "ISO images (*.iso)|*.iso", CheckFileExists = true, Multiselect = false };
+        var dialog = new OpenFileDialog { Title = $"Select an ISO for {partition.Name}", Filter = "ISO images (*.iso)|*.iso", CheckFileExists = true, Multiselect = false, InitialDirectory = PickerLocationStore.Get("ISO") };
         if (dialog.ShowDialog(owner) != true) return;
+        PickerLocationStore.Set("ISO", Path.GetDirectoryName(dialog.FileName));
         if (new FileInfo(dialog.FileName).Length + 256L * 1024 * 1024 > partitionBytes)
         {
             MessageBox.Show($"The selected ISO needs more room than partition {partition.Name}. Increase the partition size and select it again.",

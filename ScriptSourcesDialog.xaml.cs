@@ -28,9 +28,11 @@ public partial class ScriptSourcesDialog : Window
             Title = "Select Windows Setup scripts and supporting files",
             Filter = "All files (*.*)|*.*",
             CheckFileExists = true,
-            Multiselect = true
+            Multiselect = true,
+            InitialDirectory = PickerLocationStore.Get("Scripts")
         };
         if (dialog.ShowDialog(this) != true) return;
+        PickerLocationStore.Set("Scripts", Path.GetDirectoryName(dialog.FileNames[0]));
 
         var problems = new List<string>();
         foreach (var path in dialog.FileNames)
