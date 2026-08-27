@@ -53,7 +53,7 @@ public partial class MainWindow : Window
     private double _activityProgressStart;
     private double _activityProgressEnd;
     private string _activityName = "Transfer";
-    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.46"}";
+    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.47"}";
     private const string MainPartitionDragFormat = "LaptopQaUsbBuilder.MainPartition";
     private const string ScriptRunnerName = "LaptopQA-RunScripts.cmd";
     private const string ScriptCleanupName = "LaptopQA-Cleanup.ps1";
@@ -77,11 +77,30 @@ public partial class MainWindow : Window
         };
         Closing += (_, e) =>
         {
-            if (!_isBuilding && !_isPreflighting) return;
+            if (!_isBuilding && !_isPreflighting)
+            {
+                CleanupTemporaryCaches();
+                return;
+            }
             e.Cancel = true;
             MessageBox.Show(_isPreflighting ? "Wait for the build safety checks to finish before closing." : "Wait for the active USB build to finish before closing.",
                 _isPreflighting ? "Preparing build" : "Build in progress", MessageBoxButton.OK, MessageBoxImage.Information);
         };
+    }
+
+    private static void CleanupTemporaryCaches()
+    {
+        var cacheRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LaptopQAUsbBuilder");
+        foreach (var name in new[] { "MediaCache", "DriverPackCache", "DriverPayloadCache" })
+        {
+            var path = Path.Combine(cacheRoot, name);
+            for (var attempt = 0; attempt < 3 && Directory.Exists(path); attempt++)
+            {
+                try { Directory.Delete(path, true); }
+                catch (IOException) { Thread.Sleep(150); }
+                catch (UnauthorizedAccessException) { Thread.Sleep(150); }
+            }
+        }
     }
 
     private async Task RefreshDisksAsync()
