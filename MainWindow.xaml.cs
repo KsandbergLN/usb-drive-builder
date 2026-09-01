@@ -53,7 +53,7 @@ public partial class MainWindow : Window
     private double _activityProgressStart;
     private double _activityProgressEnd;
     private string _activityName = "Transfer";
-    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.56"}";
+    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.68"}";
     private const string MainPartitionDragFormat = "LaptopQaUsbBuilder.MainPartition";
     private const string ScriptRunnerName = "LaptopQA-RunScripts.cmd";
     private const string ScriptCleanupName = "LaptopQA-Cleanup.ps1";
@@ -666,27 +666,36 @@ public partial class MainWindow : Window
         return "<?xml version=\"1.0\" encoding=\"utf-8\"?>" + Environment.NewLine + document;
     }
 
+    internal static string BuildGeneratedAutounattend(WindowsSetupConfig setup)
+    {
+        XNamespace unattend = "urn:schemas-microsoft-com:unattend";
+        XNamespace wcm = "http://schemas.microsoft.com/WMIConfig/2002/State";
+        XNamespace xsi = "http://www.w3.org/2001/XMLSchema-instance";
+        var document = new XDocument(new XElement(unattend + "unattend",
+            new XAttribute(XNamespace.Xmlns + "wcm", wcm.NamespaceName),
+            new XAttribute(XNamespace.Xmlns + "xsi", xsi.NamespaceName)));
+        AddGeneratedWindowsSetup(document, setup, unattend, wcm);
+        document.Declaration = null;
+        return "<?xml version=\"1.0\" encoding=\"utf-8\"?>" + Environment.NewLine + document;
+    }
+
     private static void AddGeneratedWindowsSetup(XDocument document, WindowsSetupConfig setup, XNamespace unattend, XNamespace wcm)
     {
+        ValidateGeneratedWindowsSetup(setup);
         var root = document.Root!;
         var settings = new XElement(unattend + "settings", new XAttribute("pass", "windowsPE"));
+        settings.Add(new XElement(unattend + "component",
+            new XAttribute("name", "Microsoft-Windows-International-Core-WinPE"),
+            new XAttribute("processorArchitecture", "amd64"),
+            new XAttribute("publicKeyToken", "31bf3856ad364e35"),
+            new XAttribute("language", "neutral"),
+            new XAttribute("versionScope", "nonSxS"),
+            new XElement(unattend + "SetupUILanguage", new XElement(unattend + "UILanguage", setup.OobeLanguage)),
+            new XElement(unattend + "InputLocale", setup.OobeKeyboard),
+            new XElement(unattend + "SystemLocale", setup.OobeLanguage),
+            new XElement(unattend + "UILanguage", setup.OobeLanguage),
+            new XElement(unattend + "UserLocale", setup.OobeLanguage)));
         var component = new XElement(unattend + "component", new XAttribute("name", "Microsoft-Windows-Setup"), new XAttribute("processorArchitecture", "amd64"), new XAttribute("publicKeyToken", "31bf3856ad364e35"), new XAttribute("language", "neutral"), new XAttribute("versionScope", "nonSxS"));
-        var firstDiskpart = $"SELECT DISK={setup.TargetDisk}&echo:CLEAN&echo:CONVERT GPT&echo:CREATE PARTITION EFI SIZE={setup.EfiSizeMb}&echo:FORMAT QUICK FS=FAT32 LABEL=^\"{setup.EfiLabel}^\"&echo:ASSIGN LETTER={setup.EfiLetter}&echo:CREATE PARTITION MSR SIZE={setup.MsrSizeMb}&echo:CREATE PARTITION PRIMARY";
-        var secondDiskpart = $"SHRINK MINIMUM={setup.WindowsShrinkMb}&echo:FORMAT QUICK FS=NTFS LABEL=^\"{setup.WindowsLabel}^\"&echo:ASSIGN LETTER={setup.WindowsLetter}&echo:CREATE PARTITION PRIMARY&echo:FORMAT QUICK FS=NTFS LABEL=^\"{setup.RecoveryLabel}^\"&echo:ASSIGN LETTER={setup.RecoveryLetter}";
-        var thirdDiskpart = "SET ID=^\"de94bba4-06d1-4d40-a16a-bfd50179d6ac^\"&echo:GPT ATTRIBUTES=0x8000000000000001";
-        var commands = new XElement(unattend + "RunSynchronous");
-        var order = 1;
-        if (setup.PromptBeforeInstall)
-        {
-            var promptScript = $@"cmd.exe /c "">""X:\confirm-reimage.vbs"" (echo:answer = MsgBox(^""Windows Setup is ready to reimage this computer.^"" ^& vbCrLf ^& vbCrLf ^& ^""This will erase all data on Disk {setup.TargetDisk} and install a fresh copy of Windows.^"" ^& vbCrLf ^& vbCrLf ^& ^""Select Yes to begin, or No to return without making changes.^"", vbYesNo + vbQuestion + vbDefaultButton2, ^""Ready to Reimage^""^)&echo:If answer ^<^> vbYes Then&echo:WScript.Echo ^""Reimage cancelled by user.^""&echo:WScript.Quit 1&echo:End If)";
-            commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Create reimage confirmation prompt"), new XElement(unattend + "Path", promptScript)));
-            commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Confirm Windows installation"), new XElement(unattend + "Path", "cscript.exe //nologo //E:vbscript \"X:\\confirm-reimage.vbs\"")));
-        }
-        commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Write GPT partition script"), new XElement(unattend + "Path", $"cmd.exe /c \">>\"X:\\diskpart.txt\" (echo:{firstDiskpart})")));
-        commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Add Windows and Recovery partitions"), new XElement(unattend + "Path", $"cmd.exe /c \">>\"X:\\diskpart.txt\" (echo:{secondDiskpart})")));
-        commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order++), new XElement(unattend + "Description", "Mark the Recovery partition"), new XElement(unattend + "Path", $"cmd.exe /c \">>\"X:\\diskpart.txt\" (echo:{thirdDiskpart})")));
-        commands.Add(new XElement(unattend + "RunSynchronousCommand", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Order", order), new XElement(unattend + "Description", "Run DiskPart"), new XElement(unattend + "Path", "cmd.exe /c \"diskpart.exe /s \"X:\\diskpart.txt\" >>\"X:\\diskpart.log\" || ( type \"X:\\diskpart.log\" & echo diskpart encountered an error. & pause & exit /b 1 )\"")));
-        component.Add(commands);
         var imageInstall = new XElement(unattend + "ImageInstall",
             new XElement(unattend + "OSImage",
                 new XElement(unattend + "InstallFrom",
@@ -695,7 +704,115 @@ public partial class MainWindow : Window
         component.Add(imageInstall);
         component.Add(new XElement(unattend + "UserData", new XElement(unattend + "AcceptEula", "true")));
         component.Add(new XElement(unattend + "UseConfigurationSet", "true"));
-        settings.Add(component); root.AddFirst(settings);
+
+        // Windows PE can reliably execute a short command at a time.  Keep the partition
+        // script writes separate: shell grouping and nested quotes can silently join two
+        // DiskPart commands together (for example, FORMAT and ASSIGN) on some WinPE builds.
+        var commands = new XElement(unattend + "RunSynchronous");
+        var order = 1;
+        if (setup.PromptBeforeInstall)
+        {
+            var confirmationLines = new[]
+            {
+                $"answer = MsgBox(\"Windows Setup is ready to reimage this computer.\" & vbCrLf & vbCrLf & \"This will erase all data on Disk {setup.TargetDisk} and install a fresh copy of Windows.\" & vbCrLf & vbCrLf & \"Select Yes to begin, or No to return without making changes.\", vbYesNo + vbQuestion + vbDefaultButton2, \"Ready to Reimage\")",
+                "If answer <> vbYes Then",
+                "WScript.Echo \"Reimage cancelled by user.\"",
+                "WScript.Quit 1",
+                "End If"
+            };
+            for (var index = 0; index < confirmationLines.Length; index++)
+            {
+                var redirect = index == 0 ? ">" : ">>";
+                AddRunSynchronousCommand(commands, unattend, wcm, ref order, "Create reimage confirmation", $"cmd.exe /c echo {EscapeCommandEcho(confirmationLines[index])} {redirect} X:\\confirm-reimage.vbs");
+            }
+            AddRunSynchronousCommand(commands, unattend, wcm, ref order, "Confirm Windows installation", "cscript.exe //nologo //E:vbscript \"X:\\confirm-reimage.vbs\"");
+        }
+
+        var diskpartLines = new[]
+        {
+            $"SELECT DISK={setup.TargetDisk}",
+            "CLEAN",
+            "CONVERT GPT",
+            $"CREATE PARTITION EFI SIZE={setup.EfiSizeMb}",
+            $"FORMAT QUICK FS=FAT32 LABEL={setup.EfiLabel}",
+            $"ASSIGN LETTER={setup.EfiLetter}",
+            $"CREATE PARTITION MSR SIZE={setup.MsrSizeMb}",
+            "CREATE PARTITION PRIMARY",
+            $"SHRINK MINIMUM={setup.WindowsShrinkMb}",
+            $"FORMAT QUICK FS=NTFS LABEL={setup.WindowsLabel}",
+            $"ASSIGN LETTER={setup.WindowsLetter}",
+            "CREATE PARTITION PRIMARY",
+            $"FORMAT QUICK FS=NTFS LABEL={setup.RecoveryLabel}",
+            $"ASSIGN LETTER={setup.RecoveryLetter}",
+            "SET ID=de94bba4-06d1-4d40-a16a-bfd50179d6ac",
+            "GPT ATTRIBUTES=0x8000000000000001"
+        };
+        for (var index = 0; index < diskpartLines.Length; index++)
+        {
+            var redirect = index == 0 ? ">" : ">>";
+            AddRunSynchronousCommand(commands, unattend, wcm, ref order, "Write GPT partition script", $"cmd.exe /c echo {diskpartLines[index]} {redirect} X:\\diskpart.txt");
+        }
+        AddRunSynchronousCommand(commands, unattend, wcm, ref order, "Run DiskPart", "cmd.exe /c diskpart.exe /s X:\\diskpart.txt > X:\\diskpart.log 2>&1");
+        component.Add(commands);
+        settings.Add(component);
+        root.AddFirst(settings);
+
+        var oobeSettings = new XElement(unattend + "settings", new XAttribute("pass", "oobeSystem"));
+        oobeSettings.Add(new XElement(unattend + "component",
+            new XAttribute("name", "Microsoft-Windows-International-Core"),
+            new XAttribute("processorArchitecture", "amd64"),
+            new XAttribute("publicKeyToken", "31bf3856ad364e35"),
+            new XAttribute("language", "neutral"),
+            new XAttribute("versionScope", "nonSxS"),
+            new XElement(unattend + "InputLocale", setup.OobeKeyboard),
+            new XElement(unattend + "SystemLocale", setup.OobeLanguage),
+            new XElement(unattend + "UILanguage", setup.OobeLanguage),
+            new XElement(unattend + "UserLocale", setup.OobeLanguage)));
+        root.Add(oobeSettings);
+    }
+
+    private static void AddRunSynchronousCommand(XElement commands, XNamespace unattend, XNamespace wcm, ref int order, string description, string path)
+    {
+        commands.Add(new XElement(unattend + "RunSynchronousCommand",
+            new XAttribute(wcm + "action", "add"),
+            new XElement(unattend + "Order", order++),
+            new XElement(unattend + "Description", description),
+            new XElement(unattend + "Path", path)));
+    }
+
+    private static string EscapeCommandEcho(string value) => value
+        .Replace("^", "^^")
+        .Replace("&", "^&")
+        .Replace("|", "^|")
+        .Replace("<", "^<")
+        .Replace(">", "^>")
+        .Replace("(", "^(")
+        .Replace(")", "^)");
+
+    private static void ValidateGeneratedWindowsSetup(WindowsSetupConfig setup)
+    {
+        ValidateDiskpartLabel(setup.EfiLabel, "EFI label");
+        ValidateDiskpartLabel(setup.WindowsLabel, "Windows label");
+        ValidateDiskpartLabel(setup.RecoveryLabel, "Recovery label");
+        ValidateDriveLetter(setup.EfiLetter, "EFI letter");
+        ValidateDriveLetter(setup.WindowsLetter, "Windows letter");
+        ValidateDriveLetter(setup.RecoveryLetter, "Recovery letter");
+        if (!System.Text.RegularExpressions.Regex.IsMatch(setup.OobeLanguage, "^[A-Za-z]{2,3}-[A-Za-z]{2,4}$"))
+            throw new InvalidOperationException("OOBE language must use a Windows language tag such as en-US.");
+        if (!System.Text.RegularExpressions.Regex.IsMatch(setup.OobeKeyboard, "^[0-9A-Fa-f]{4}:[0-9A-Fa-f]{8}$"))
+            throw new InvalidOperationException("OOBE keyboard must use a locale and keyboard layout such as 0409:00000409.");
+    }
+
+    private static void ValidateDiskpartLabel(string? value, string fieldName)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Any(character => !char.IsLetterOrDigit(character) && character is not ' ' and not '-' and not '_'))
+            throw new InvalidOperationException($"{fieldName} may contain only letters, numbers, spaces, hyphens, and underscores.");
+    }
+
+    private static void ValidateDriveLetter(string? value, string fieldName)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length != 1 || !char.IsLetter(value[0]))
+            throw new InvalidOperationException($"{fieldName} must be a single letter.");
     }
 
     private static string BuildScriptRunner(IEnumerable<string> scriptPaths)
@@ -708,7 +825,7 @@ public partial class MainWindow : Window
             {
                 case ".cmd":
                 case ".bat":
-                    lines.Add($"\"%ComSpec%\" /d /s /c \"\"%~dp0{name}\"\"");
+                    lines.Add($"call \"%~dp0{name}\"");
                     break;
                 case ".ps1":
                     lines.Add($"\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0{name}\"");
@@ -1946,6 +2063,11 @@ public partial class MainWindow : Window
     private async void PartitionContentAdd_Click(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is not PartitionConfig partition) return;
+        if (!partition.FileSystem.Equals("NTFS", StringComparison.OrdinalIgnoreCase))
+        {
+            await AddPartitionContentSourcesAsync(partition, this);
+            return;
+        }
         var dialog = new PartitionContentDialog(partition, _preferences.Theme) { Owner = this };
         dialog.ActionHandler = async (action, owner) => await HandlePartitionContentActionAsync(partition, action, owner);
         dialog.ShowDialog();
@@ -1955,8 +2077,10 @@ public partial class MainWindow : Window
     {
         switch (action)
         {
-            case PartitionContentAction.Files: await AddPartitionFilesAsync(partition, owner); break;
-            case PartitionContentAction.Folder: await AddPartitionFolderAsync(partition, owner); break;
+            case PartitionContentAction.Files:
+            case PartitionContentAction.Folder:
+                await AddPartitionContentSourcesAsync(partition, owner);
+                break;
             case PartitionContentAction.Autounattend: await AddPartitionAutounattendAsync(partition, owner); break;
             case PartitionContentAction.Iso: await AddPartitionIsoAsync(partition, owner); break;
             case PartitionContentAction.ScriptFiles: await AddPartitionScriptFilesAsync(partition, owner); break;
@@ -1964,23 +2088,16 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task AddPartitionFilesAsync(PartitionConfig partition, Window owner)
+    private async Task AddPartitionContentSourcesAsync(PartitionConfig partition, Window owner)
     {
-        var dialog = new OpenFileDialog { Title = $"Select files for {partition.Name}", Filter = "All files (*.*)|*.*", CheckFileExists = true, Multiselect = true, InitialDirectory = PickerLocationStore.Get("Files") };
-        if (dialog.ShowDialog(owner) != true) return;
-        PickerLocationStore.Set("Files", Path.GetDirectoryName(dialog.FileNames[0]));
-        foreach (var path in dialog.FileNames)
-            if (!partition.SourceFiles.Any(existing => existing.Equals(path, StringComparison.OrdinalIgnoreCase))) partition.SourceFiles.Add(path);
-        await RefreshPartitionContentSizeAsync(partition, true); UpdateBuildButton();
-    }
-
-    private async Task AddPartitionFolderAsync(PartitionConfig partition, Window owner)
-    {
-        var dialog = new OpenFolderDialog { Title = $"Select a folder for {partition.Name}", Multiselect = false, InitialDirectory = PickerLocationStore.Get("Folder") };
-        if (dialog.ShowDialog(owner) != true) return;
-        PickerLocationStore.Set("Folder", dialog.FolderName);
-        if (!partition.SourceFolders.Any(existing => existing.Equals(dialog.FolderName, StringComparison.OrdinalIgnoreCase))) partition.SourceFolders.Add(dialog.FolderName);
-        await RefreshPartitionContentSizeAsync(partition, true); UpdateBuildButton();
+        var dialog = new ContentSourcesDialog(partition.Name, partition.SourceFiles, partition.SourceFolders, _preferences.Theme) { Owner = owner };
+        if (dialog.ShowDialog() != true) return;
+        partition.SourceFiles.Clear();
+        foreach (var path in dialog.SourceFiles) partition.SourceFiles.Add(path);
+        partition.SourceFolders.Clear();
+        foreach (var path in dialog.SourceFolders) partition.SourceFolders.Add(path);
+        await RefreshPartitionContentSizeAsync(partition, true);
+        UpdateBuildButton();
     }
 
     private async Task AddPartitionAutounattendAsync(PartitionConfig partition, Window owner)

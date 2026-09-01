@@ -9,13 +9,13 @@ namespace LaptopQaUsbBuilder;
 public partial class ScriptSourcesDialog : Window
 {
     private static readonly string[] ReservedNames = ["LaptopQA-RunScripts.cmd", "LaptopQA-Cleanup.ps1"];
-    private readonly ObservableCollection<string> _sources = [];
+    private readonly ObservableCollection<ScriptSourceItem> _sources = [];
     public IReadOnlyList<string> ScriptFiles { get; private set; } = [];
 
     public ScriptSourcesDialog(IEnumerable<string> files, string theme)
     {
         InitializeComponent();
-        foreach (var path in files.Distinct(StringComparer.OrdinalIgnoreCase)) _sources.Add(path);
+        foreach (var path in files.Distinct(StringComparer.OrdinalIgnoreCase)) _sources.Add(new ScriptSourceItem(path));
         SourcesList.ItemsSource = _sources;
         ThemeService.Apply(this, theme);
         Loaded += (_, _) => ThemeService.Apply(this, theme);
@@ -57,19 +57,19 @@ public partial class ScriptSourcesDialog : Window
         var problems = new List<string>();
         foreach (var path in paths)
         {
-            if (_sources.Contains(path, StringComparer.OrdinalIgnoreCase)) continue;
+            if (_sources.Any(source => source.Path.Equals(path, StringComparison.OrdinalIgnoreCase))) continue;
             var name = Path.GetFileName(path);
             if (ReservedNames.Contains(name, StringComparer.OrdinalIgnoreCase))
             {
                 problems.Add($"'{name}' is reserved for the app-generated script runner.");
                 continue;
             }
-            if (_sources.Any(existing => Path.GetFileName(existing).Equals(name, StringComparison.OrdinalIgnoreCase)))
+            if (_sources.Any(existing => existing.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
             {
                 problems.Add($"'{name}' is already selected from another location.");
                 continue;
             }
-            _sources.Add(path);
+            _sources.Add(new ScriptSourceItem(path));
         }
 
         if (problems.Count > 0)
@@ -79,14 +79,14 @@ public partial class ScriptSourcesDialog : Window
 
     private void Remove_Click(object sender, RoutedEventArgs e)
     {
-        if (SourcesList.SelectedItem is string selected) _sources.Remove(selected);
+        if (SourcesList.SelectedItem is ScriptSourceItem selected) _sources.Remove(selected);
     }
 
     private void Clear_Click(object sender, RoutedEventArgs e) => _sources.Clear();
 
     private void Close_Click(object sender, RoutedEventArgs e)
     {
-        ScriptFiles = _sources.ToArray();
+        ScriptFiles = _sources.Select(source => source.Path).ToArray();
         DialogResult = true;
     }
 
@@ -94,4 +94,10 @@ public partial class ScriptSourcesDialog : Window
     {
         if (e.ChangedButton == MouseButton.Left) DragMove();
     }
+}
+
+public sealed record ScriptSourceItem(string Path)
+{
+    public string Name => System.IO.Path.GetFileName(Path);
+    public string Folder => System.IO.Path.GetDirectoryName(Path) ?? string.Empty;
 }

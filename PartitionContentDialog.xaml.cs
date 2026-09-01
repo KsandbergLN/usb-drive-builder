@@ -57,10 +57,9 @@ public partial class PartitionContentDialog : Window
         XmlButton.Visibility = isNtfs ? Visibility.Visible : Visibility.Collapsed;
         IsoButton.Visibility = isNtfs ? Visibility.Visible : Visibility.Collapsed;
         IsoExtrasSection.Visibility = isNtfs ? Visibility.Visible : Visibility.Collapsed;
-        StandardButtons.Columns = isNtfs ? 4 : 2;
+        StandardButtons.Columns = isNtfs ? 3 : 1;
         Width = isNtfs ? 620 : 390;
-        SetSelected(FilesButton, _partition.SourceFiles.Count > 0);
-        SetSelected(FolderButton, _partition.SourceFolders.Count > 0);
+        SetSelected(FilesButton, _partition.SourceFiles.Count + _partition.SourceFolders.Count > 0);
         SetSelected(XmlButton, _partition.HasAutounattend);
         SetSelected(IsoButton, _partition.HasIso);
         SetSelected(DriversButton, _partition.HasDrivers);

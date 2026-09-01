@@ -15,12 +15,29 @@
       <UserData><AcceptEula>true</AcceptEula></UserData>
       <UseConfigurationSet>true</UseConfigurationSet>
       <RunSynchronous>
-        <RunSynchronousCommand wcm:action="add"><Order>1</Order><Description>Create reimage confirmation prompt</Description><Path>cmd.exe /c &quot;&gt;&quot;X:\confirm-reimage.vbs&quot; (echo:answer = MsgBox(^&quot;Windows Setup is ready to reimage this computer.^&quot; ^&amp; vbCrLf ^&amp; vbCrLf ^&amp; ^&quot;This will erase all data on Disk 0 and install a fresh copy of Windows.^&quot; ^&amp; vbCrLf ^&amp; vbCrLf ^&amp; ^&quot;Select Yes to begin, or No to return without making changes.^&quot;, vbYesNo + vbQuestion + vbDefaultButton2, ^&quot;Ready to Reimage^&quot;^)&amp;echo:If answer ^&lt;^&gt; vbYes Then&amp;echo:WScript.Echo ^&quot;Reimage cancelled by user.^&quot;&amp;echo:WScript.Quit 1&amp;echo:End If)&quot;</Path></RunSynchronousCommand>
-        <RunSynchronousCommand wcm:action="add"><Order>2</Order><Description>Confirm Windows installation</Description><Path>cscript.exe //nologo //E:vbscript &quot;X:\confirm-reimage.vbs&quot;</Path></RunSynchronousCommand>
-        <RunSynchronousCommand wcm:action="add"><Order>3</Order><Description>Write GPT partition script</Description><Path>cmd.exe /c &quot;&gt;&gt;&quot;X:\diskpart.txt&quot; (echo:SELECT DISK=0&amp;echo:CLEAN&amp;echo:CONVERT GPT&amp;echo:CREATE PARTITION EFI SIZE=1500&amp;echo:FORMAT QUICK FS=FAT32 LABEL=^&quot;System^&quot;&amp;echo:ASSIGN LETTER=S&amp;echo:CREATE PARTITION MSR SIZE=16&amp;echo:CREATE PARTITION PRIMARY)&quot;</Path></RunSynchronousCommand>
-        <RunSynchronousCommand wcm:action="add"><Order>4</Order><Description>Add Windows and Recovery partitions</Description><Path>cmd.exe /c &quot;&gt;&gt;&quot;X:\diskpart.txt&quot; (echo:SHRINK MINIMUM=1000&amp;echo:FORMAT QUICK FS=NTFS LABEL=^&quot;Windows^&quot;&amp;echo:ASSIGN LETTER=W&amp;echo:CREATE PARTITION PRIMARY&amp;echo:FORMAT QUICK FS=NTFS LABEL=^&quot;Recovery^&quot;&amp;echo:ASSIGN LETTER=R)&quot;</Path></RunSynchronousCommand>
-        <RunSynchronousCommand wcm:action="add"><Order>5</Order><Description>Mark the Recovery partition</Description><Path>cmd.exe /c &quot;&gt;&gt;&quot;X:\diskpart.txt&quot; (echo:SET ID=^&quot;de94bba4-06d1-4d40-a16a-bfd50179d6ac^&quot;&amp;echo:GPT ATTRIBUTES=0x8000000000000001)&quot;</Path></RunSynchronousCommand>
-        <RunSynchronousCommand wcm:action="add"><Order>6</Order><Description>Run DiskPart</Description><Path>cmd.exe /c &quot;diskpart.exe /s &quot;X:\diskpart.txt&quot; &gt;&gt;&quot;X:\diskpart.log&quot; || ( type &quot;X:\diskpart.log&quot; &amp; echo diskpart encountered an error. &amp; pause &amp; exit /b 1 )&quot;</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>1</Order><Description>Create reimage confirmation</Description><Path>cmd.exe /c echo answer = MsgBox^("Windows Setup is ready to reimage this computer." ^&amp; vbCrLf ^&amp; vbCrLf ^&amp; "This will erase all data on Disk 0 and install a fresh copy of Windows." ^&amp; vbCrLf ^&amp; vbCrLf ^&amp; "Select Yes to begin, or No to return without making changes.", vbYesNo + vbQuestion + vbDefaultButton2, "Ready to Reimage"^) &gt; X:\confirm-reimage.vbs</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>2</Order><Description>Create reimage confirmation</Description><Path>cmd.exe /c echo If answer ^&lt;^&gt; vbYes Then &gt;&gt; X:\confirm-reimage.vbs</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>3</Order><Description>Create reimage confirmation</Description><Path>cmd.exe /c echo WScript.Echo "Reimage cancelled by user." &gt;&gt; X:\confirm-reimage.vbs</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>4</Order><Description>Create reimage confirmation</Description><Path>cmd.exe /c echo WScript.Quit 1 &gt;&gt; X:\confirm-reimage.vbs</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>5</Order><Description>Create reimage confirmation</Description><Path>cmd.exe /c echo End If &gt;&gt; X:\confirm-reimage.vbs</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>6</Order><Description>Confirm Windows installation</Description><Path>cscript.exe //nologo //E:vbscript "X:\confirm-reimage.vbs"</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>7</Order><Description>Write GPT partition script</Description><Path>cmd.exe /c echo SELECT DISK=0 &gt; X:\diskpart.txt</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>8</Order><Description>Write GPT partition script</Description><Path>cmd.exe /c echo CLEAN &gt;&gt; X:\diskpart.txt</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>9</Order><Description>Write GPT partition script</Description><Path>cmd.exe /c echo CONVERT GPT &gt;&gt; X:\diskpart.txt</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>10</Order><Description>Write GPT partition script</Description><Path>cmd.exe /c echo CREATE PARTITION EFI SIZE=1500 &gt;&gt; X:\diskpart.txt</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>11</Order><Description>Write GPT partition script</Description><Path>cmd.exe /c echo FORMAT QUICK FS=FAT32 LABEL=System &gt;&gt; X:\diskpart.txt</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>12</Order><Description>Write GPT partition script</Description><Path>cmd.exe /c echo ASSIGN LETTER=S &gt;&gt; X:\diskpart.txt</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>13</Order><Description>Write GPT partition script</Description><Path>cmd.exe /c echo CREATE PARTITION MSR SIZE=16 &gt;&gt; X:\diskpart.txt</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>14</Order><Description>Write GPT partition script</Description><Path>cmd.exe /c echo CREATE PARTITION PRIMARY &gt;&gt; X:\diskpart.txt</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>15</Order><Description>Write GPT partition script</Description><Path>cmd.exe /c echo SHRINK MINIMUM=1000 &gt;&gt; X:\diskpart.txt</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>16</Order><Description>Write GPT partition script</Description><Path>cmd.exe /c echo FORMAT QUICK FS=NTFS LABEL=Windows &gt;&gt; X:\diskpart.txt</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>17</Order><Description>Write GPT partition script</Description><Path>cmd.exe /c echo ASSIGN LETTER=W &gt;&gt; X:\diskpart.txt</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>18</Order><Description>Write GPT partition script</Description><Path>cmd.exe /c echo CREATE PARTITION PRIMARY &gt;&gt; X:\diskpart.txt</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>19</Order><Description>Write GPT partition script</Description><Path>cmd.exe /c echo FORMAT QUICK FS=NTFS LABEL=Recovery &gt;&gt; X:\diskpart.txt</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>20</Order><Description>Write GPT partition script</Description><Path>cmd.exe /c echo ASSIGN LETTER=R &gt;&gt; X:\diskpart.txt</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>21</Order><Description>Write GPT partition script</Description><Path>cmd.exe /c echo SET ID=de94bba4-06d1-4d40-a16a-bfd50179d6ac &gt;&gt; X:\diskpart.txt</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>22</Order><Description>Write GPT partition script</Description><Path>cmd.exe /c echo GPT ATTRIBUTES=0x8000000000000001 &gt;&gt; X:\diskpart.txt</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>23</Order><Description>Run DiskPart</Description><Path>cmd.exe /c diskpart.exe /s X:\diskpart.txt &gt; X:\diskpart.log 2&gt;&amp;1</Path></RunSynchronousCommand>
       </RunSynchronous>
     </component>
   </settings>
@@ -30,6 +47,9 @@
     </component>
   </settings>
   <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <InputLocale>0409:00000409</InputLocale><SystemLocale>en-US</SystemLocale><UILanguage>en-US</UILanguage><UserLocale>en-US</UserLocale>
+    </component>
     <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
       <OOBE><HideEULAPage>true</HideEULAPage><HideWirelessSetupInOOBE>false</HideWirelessSetupInOOBE><HideOnlineAccountScreens>false</HideOnlineAccountScreens></OOBE>
     </component>
