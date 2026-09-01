@@ -50,17 +50,22 @@ The **Generated Windows Setup defaults** section is used only when scripts are s
 | Shrink MB | Space reserved from the Windows partition for the Recovery partition, in MB. |
 | EFI / Windows / Recovery label | Volume labels assigned to those internal-disk partitions. |
 | EFI / Win / Rec letters | Temporary drive letters used by Windows Setup while it creates and formats the partitions. |
-| Edition | Windows image name requested from the selected ISO; it should match one of that ISO's available editions. |
-| Prompt before erasing/installing | Adds a Yes/No prompt in Windows Setup before the internal disk is erased and Windows is installed. |
+| Edition | Select the Windows image name requested from the selected ISO; it must match an edition included in that ISO. |
+| Prompt before erasing/installing | Shows the Windows PE **Ready to Reimage** Yes/No dialog before the internal disk is erased and Windows is installed. **No** is selected by default. |
+| OOBE language / OOBE keyboard | Choose the Windows language and keyboard from the drop-downs used after Setup. Defaults are English (United States) and US keyboard; the selected language must be included in the chosen ISO. These settings bypass the language and keyboard choices during OOBE. |
 
-The **Allow unsigned drivers** option applies only to optional DISM driver injection and adds `/ForceUnsigned`; it does not override Windows or Secure Boot policy. The lock icon protects the default partition rows and generated settings from accidental edits until unlocked.
+The generated answer file writes the GPT DiskPart script one line at a time before it runs it. This avoids nested shell quoting that can merge `FORMAT` and `ASSIGN` commands on some Windows PE builds. Volume labels in the generated layout may use letters, numbers, spaces, hyphens, and underscores; temporary drive letters must be one letter each. The **Allow unsigned drivers** option applies only to optional DISM driver injection and adds `/ForceUnsigned`; it does not override Windows or Secure Boot policy. The lock icon protects the default partition rows and generated settings from accidental edits until unlocked.
+
+The generated settings dim while locked. **Generate Autounattend.xml** stays available: choose where to save it, and it exports an answer file using the currently displayed setup settings without changing them.
 
 
 ## Adding content
 
-Every partition row has a muted, theme-aware green **Add** button stacked above a muted red **Clear** button with no content heading. Add opens an app-themed content manager that remains open while multiple content types are selected, sizes itself to the actions available for that file system, and closes only when **Close** is chosen. Clear removes all content assigned to that partition. Green text to their right summarizes attached types—`AUXML`, `ISO`, `Folder`, `Files`, `Drivers`, and `Scripts`—without expanding the row into separate buttons. Folder contents are merged into the destination partition root, while selected files are copied directly to that root.
+Every partition row has a muted, theme-aware green **Add** button stacked above a muted red **Clear** button with no content heading. On FAT32 and exFAT, Add opens the Files / folders source manager directly. On NTFS, Add presents the additional XML, ISO, Drivers, and Scripts actions before opening their respective managers. Clear removes all content assigned to that partition. Green text to their right summarizes attached types—`AUXML`, `ISO`, `Folder`, `Files`, `Drivers`, and `Scripts`—without expanding the row into separate buttons. Folder contents are merged into the destination partition root, while selected files are copied directly to that root.
 
 Every content-manager action changes from grey to green immediately after that content type has a successful selection. Cancelling a picker leaves its button unchanged.
+
+The **Files / folders** action opens the same managed-source dialog used by Drivers and Scripts: add files or folders repeatedly from multiple locations, review the list, remove an individual selection, clear it, then close to apply it. Script entries show both their filename and their source folder, including files found by **Add Folder**.
 
 Positive and destructive controls use the same theme-aware palette throughout the app. Light and Dark use the desaturated `#D7F3E5` green and `#D8A2A3` red; AMOLED uses higher-saturation equivalents with contrasting text.
 

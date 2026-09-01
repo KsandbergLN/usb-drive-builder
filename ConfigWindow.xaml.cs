@@ -9,11 +9,30 @@ using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
+using Microsoft.Win32;
+using System.Text;
 
 namespace LaptopQaUsbBuilder;
 
 public partial class ConfigWindow : Window, INotifyPropertyChanged
 {
+    private static readonly IReadOnlyList<OobeLanguageOption> OobeLanguages =
+    [
+        new("en-US", "English (United States)"), new("es-ES", "Spanish (Spain)"), new("fr-FR", "French (France)"), new("de-DE", "German (Germany)"),
+        new("pt-BR", "Portuguese (Brazil)"), new("zh-CN", "Chinese, Simplified (China)"), new("ja-JP", "Japanese (Japan)"), new("hi-IN", "Hindi (India)"),
+        new("bn-IN", "Bengali (India)"), new("ta-IN", "Tamil (India)"), new("te-IN", "Telugu (India)"), new("mr-IN", "Marathi (India)")
+    ];
+    private static readonly IReadOnlyList<OobeKeyboardOption> OobeKeyboards =
+    [
+        new("0409:00000409", "US"), new("0C0A:0000040A", "Spanish"), new("040C:0000040C", "French"), new("0407:00000407", "German"),
+        new("0416:00000416", "Portuguese (Brazil ABNT2)"), new("0804:00000804", "Chinese Simplified (Microsoft Pinyin)"), new("0411:00000411", "Japanese"), new("0439:00000439", "Hindi Traditional"),
+        new("0445:00000445", "Bengali"), new("0449:00000449", "Tamil"), new("044A:0000044A", "Telugu"), new("044E:0000044E", "Marathi")
+    ];
+    private static readonly IReadOnlyList<WindowsEditionOption> WindowsEditions =
+    [
+        new("Windows 11 Pro"), new("Windows 11 Home"), new("Windows 11 Pro N"), new("Windows 11 Education"), new("Windows 11 Enterprise"),
+        new("Windows 10 Pro"), new("Windows 10 Home"), new("Windows 10 Pro N"), new("Windows 10 Education"), new("Windows 10 Enterprise")
+    ];
     private readonly ObservableCollection<PartitionConfig> _items;
     private readonly string _originalTheme;
     private bool _defaultsLocked = true;
@@ -54,7 +73,12 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
         EfiSizeTextBox.Text = WindowsSetup.EfiSizeMb.ToString(); MsrSizeTextBox.Text = WindowsSetup.MsrSizeMb.ToString(); WindowsShrinkTextBox.Text = WindowsSetup.WindowsShrinkMb.ToString();
         EfiLabelTextBox.Text = WindowsSetup.EfiLabel; WindowsLabelTextBox.Text = WindowsSetup.WindowsLabel; RecoveryLabelTextBox.Text = WindowsSetup.RecoveryLabel;
         EfiLetterTextBox.Text = WindowsSetup.EfiLetter; WindowsLetterTextBox.Text = WindowsSetup.WindowsLetter; RecoveryLetterTextBox.Text = WindowsSetup.RecoveryLetter;
-        EditionTextBox.Text = WindowsSetup.Edition; PromptBeforeInstallCheckBox.IsChecked = WindowsSetup.PromptBeforeInstall;
+        EditionPicker.ItemsSource = WindowsEditions;
+        EditionPicker.SelectedItem = WindowsEditions.FirstOrDefault(option => option.Name.Equals(WindowsSetup.Edition, StringComparison.OrdinalIgnoreCase)) ?? WindowsEditions[0];
+        PromptBeforeInstallCheckBox.IsChecked = WindowsSetup.PromptBeforeInstall;
+        OobeLanguagePicker.ItemsSource = OobeLanguages; OobeKeyboardPicker.ItemsSource = OobeKeyboards;
+        OobeLanguagePicker.SelectedItem = OobeLanguages.FirstOrDefault(option => option.Code.Equals(WindowsSetup.OobeLanguage, StringComparison.OrdinalIgnoreCase)) ?? OobeLanguages[0];
+        OobeKeyboardPicker.SelectedItem = OobeKeyboards.FirstOrDefault(option => option.Code.Equals(WindowsSetup.OobeKeyboard, StringComparison.OrdinalIgnoreCase)) ?? OobeKeyboards[0];
         ApplyLanguage();
         ThemeService.Apply(this, SelectedTheme);
         Loaded += (_, _) => ThemeService.Apply(this, SelectedTheme);
@@ -230,6 +254,10 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
     private void SetDefaultsLocked()
     {
         PartitionGrid.IsReadOnly = _defaultsLocked;
+        GeneratedSetupPanel.IsEnabled = !_defaultsLocked;
+        GeneratedSetupPanel.Opacity = _defaultsLocked ? 0.52 : 1;
+        GeneratedSetupOptionsPanel.IsEnabled = !_defaultsLocked;
+        GeneratedSetupOptionsPanel.Opacity = _defaultsLocked ? 0.52 : 1;
         DefaultsLockButton.Content = _defaultsLocked ? "\uE72E" : "\uE785";
         DefaultsLockButton.ToolTip = _defaultsLocked ? "Unlock default partition editing" : "Lock default partition editing";
         DefaultsLockButton.SetResourceReference(System.Windows.Controls.Control.BackgroundProperty,
@@ -254,18 +282,47 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
         SelectedLanguage = (LanguagePicker.SelectedItem as LanguageOption)?.Code ?? "en-US";
         SelectedTheme = (ThemePicker.SelectedItem as ThemeOption)?.Key ?? "Light";
         ForceUnsignedDrivers = ForceUnsignedDriversCheckBox.IsChecked == true;
-        WindowsSetup = new WindowsSetupConfig
-        {
-            TargetDisk = ParseInt(TargetDiskTextBox.Text, WindowsSetup.TargetDisk),
-            InstallPartition = ParseInt(InstallPartitionTextBox.Text, WindowsSetup.InstallPartition),
-            EfiSizeMb = ParseInt(EfiSizeTextBox.Text, WindowsSetup.EfiSizeMb),
-            MsrSizeMb = ParseInt(MsrSizeTextBox.Text, WindowsSetup.MsrSizeMb),
-            WindowsShrinkMb = ParseInt(WindowsShrinkTextBox.Text, WindowsSetup.WindowsShrinkMb),
-            EfiLabel = EfiLabelTextBox.Text.Trim(), WindowsLabel = WindowsLabelTextBox.Text.Trim(), RecoveryLabel = RecoveryLabelTextBox.Text.Trim(),
-            EfiLetter = EfiLetterTextBox.Text.Trim(), WindowsLetter = WindowsLetterTextBox.Text.Trim(), RecoveryLetter = RecoveryLetterTextBox.Text.Trim(),
-            Edition = EditionTextBox.Text.Trim(), PromptBeforeInstall = PromptBeforeInstallCheckBox.IsChecked == true
-        };
+        WindowsSetup = ReadWindowsSetup();
         DialogResult = true;
+    }
+
+    private WindowsSetupConfig ReadWindowsSetup() => new()
+    {
+        TargetDisk = ParseInt(TargetDiskTextBox.Text, WindowsSetup.TargetDisk),
+        InstallPartition = ParseInt(InstallPartitionTextBox.Text, WindowsSetup.InstallPartition),
+        EfiSizeMb = ParseInt(EfiSizeTextBox.Text, WindowsSetup.EfiSizeMb),
+        MsrSizeMb = ParseInt(MsrSizeTextBox.Text, WindowsSetup.MsrSizeMb),
+        WindowsShrinkMb = ParseInt(WindowsShrinkTextBox.Text, WindowsSetup.WindowsShrinkMb),
+        EfiLabel = EfiLabelTextBox.Text.Trim(), WindowsLabel = WindowsLabelTextBox.Text.Trim(), RecoveryLabel = RecoveryLabelTextBox.Text.Trim(),
+        EfiLetter = EfiLetterTextBox.Text.Trim(), WindowsLetter = WindowsLetterTextBox.Text.Trim(), RecoveryLetter = RecoveryLetterTextBox.Text.Trim(),
+        Edition = (EditionPicker.SelectedItem as WindowsEditionOption)?.Name ?? WindowsEditions[0].Name,
+        PromptBeforeInstall = PromptBeforeInstallCheckBox.IsChecked == true,
+        OobeLanguage = (OobeLanguagePicker.SelectedItem as OobeLanguageOption)?.Code ?? OobeLanguages[0].Code,
+        OobeKeyboard = (OobeKeyboardPicker.SelectedItem as OobeKeyboardOption)?.Code ?? OobeKeyboards[0].Code
+    };
+
+    private void GenerateAutounattend_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new SaveFileDialog
+        {
+            Title = "Save generated Autounattend.xml",
+            Filter = "Autounattend.xml|Autounattend.xml|XML files (*.xml)|*.xml|All files (*.*)|*.*",
+            FileName = "Autounattend.xml",
+            DefaultExt = ".xml",
+            AddExtension = true,
+            InitialDirectory = PickerLocationStore.Get("XML")
+        };
+        if (dialog.ShowDialog(this) != true) return;
+        try
+        {
+            File.WriteAllText(dialog.FileName, MainWindow.BuildGeneratedAutounattend(ReadWindowsSetup()), new UTF8Encoding(false));
+            PickerLocationStore.Set("XML", Path.GetDirectoryName(dialog.FileName));
+            ThemedMessageDialog.Show(this, $"Generated Autounattend.xml was saved to:\n{dialog.FileName}", "Autounattend.xml generated", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            ThemedMessageDialog.Show(this, $"Autounattend.xml could not be generated.\n\n{ex.Message}", "Autounattend generation failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
     }
 
     private static int ParseInt(string text, int fallback) => int.TryParse(text, out var value) && value > 0 ? value : fallback;
@@ -278,6 +335,12 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
         { message = "Exactly one partition must use * for remaining space."; return false; }
         if (_items.Select(p => p.Name.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count() != _items.Count)
         { message = "Every volume label must be unique."; return false; }
+        if (OobeLanguagePicker.SelectedItem is not OobeLanguageOption)
+        { message = "Choose an OOBE language."; return false; }
+        if (OobeKeyboardPicker.SelectedItem is not OobeKeyboardOption)
+        { message = "Choose an OOBE keyboard."; return false; }
+        if (EditionPicker.SelectedItem is not WindowsEditionOption)
+        { message = "Choose a Windows edition."; return false; }
 
         foreach (var item in _items)
         {
@@ -365,7 +428,24 @@ public sealed class WindowsSetupConfig
     public string RecoveryLetter { get; set; } = "R";
     public string Edition { get; set; } = "Windows 11 Pro";
     public bool PromptBeforeInstall { get; set; } = true;
+    public string OobeLanguage { get; set; } = "en-US";
+    public string OobeKeyboard { get; set; } = "0409:00000409";
     public WindowsSetupConfig Clone() => (WindowsSetupConfig)MemberwiseClone();
+}
+
+public sealed record OobeLanguageOption(string Code, string Name)
+{
+    public override string ToString() => $"{Name} ({Code})";
+}
+
+public sealed record OobeKeyboardOption(string Code, string Name)
+{
+    public override string ToString() => $"{Name} ({Code})";
+}
+
+public sealed record WindowsEditionOption(string Name)
+{
+    public override string ToString() => Name;
 }
 
 public sealed class PartitionConfig

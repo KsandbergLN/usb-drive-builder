@@ -48,10 +48,9 @@
             <Border x:Name="ContentPanel" Grid.Row="1" Background="{DynamicResource ThemeCard}" BorderBrush="{DynamicResource ThemeStroke}"
                     BorderThickness="1" CornerRadius="16" Margin="20,8,20,0" Padding="18">
                 <StackPanel>
-                    <TextBlock Text="Standard content" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,9"/>
-                    <UniformGrid x:Name="StandardButtons" Columns="4" Margin="0,0,0,12">
-                        <Button x:Name="FilesButton" Content="Files" Click="Files_Click" Margin="0,0,7,0" ToolTip="Add one or more files to the partition root"/>
-                        <Button x:Name="FolderButton" Content="Folder" Click="Folder_Click" Margin="0,0,7,0" ToolTip="Merge a folder's contents into the partition root"/>
+                    <UniformGrid x:Name="StandardButtons" Columns="3">
+                        <Button x:Name="FilesButton" Content="Files / folders" Click="Files_Click" Margin="0,0,7,0" ToolTip="Manage files and folders to copy into the partition root"/>
+                        <Button x:Name="FolderButton" Visibility="Collapsed" Content="Folder" Click="Folder_Click"/>
                         <Button x:Name="XmlButton" Content="XML" Click="Xml_Click" Margin="0,0,7,0" ToolTip="Select Autounattend.xml"/>
                         <Button x:Name="IsoButton" Content="ISO" Click="Iso_Click" ToolTip="Select and prepare a Windows ISO"/>
                     </UniformGrid>
