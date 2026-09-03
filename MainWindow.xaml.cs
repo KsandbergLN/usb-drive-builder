@@ -53,10 +53,24 @@ public partial class MainWindow : Window
     private double _activityProgressStart;
     private double _activityProgressEnd;
     private string _activityName = "Transfer";
-    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.68"}";
+    private readonly List<QueueDriveProgressState> _queueDriveProgress = [];
+    private readonly List<double> _queueDriveCompletion = [];
+    private readonly List<UsbDisk> _queueProgressDisks = [];
+    private int _activeQueueDriveIndex = -1;
+    private double _activeQueueProcessStart;
+    private double _activeQueueProcessEnd;
+    private bool _trackingSharedPreparation;
+    private double _sharedPreparationPercent;
+    private double _sharedPreparationStageStart;
+    private double _sharedPreparationStageEnd;
+    private double _queuePreparationShare;
+    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.92"}";
     private const string MainPartitionDragFormat = "LaptopQaUsbBuilder.MainPartition";
     private const string ScriptRunnerName = "LaptopQA-RunScripts.cmd";
     private const string ScriptCleanupName = "LaptopQA-Cleanup.ps1";
+    internal const string CacheCleanupGuardName = "LaptopQAUsbBuilder.CacheCleanupGuard";
+    private Semaphore? _cacheCleanupGuard;
+    private bool _preservePreparedMediaForRetry;
 
     public MainWindow()
     {
@@ -79,7 +93,7 @@ public partial class MainWindow : Window
         {
             if (!_isBuilding && !_isPreflighting)
             {
-                CleanupTemporaryCaches();
+                CleanupTemporaryCaches(_preservePreparedMediaForRetry);
                 return;
             }
             e.Cancel = true;
@@ -88,19 +102,69 @@ public partial class MainWindow : Window
         };
     }
 
-    private static void CleanupTemporaryCaches()
+    private static void CleanupTemporaryCaches(bool preservePreparedMediaForRetry)
     {
-        var cacheRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LaptopQAUsbBuilder");
-        foreach (var name in new[] { "MediaCache", "DriverPackCache", "DriverPayloadCache" })
+        Semaphore? guard = null;
+        var ownsGuard = false;
+        try
         {
-            var path = Path.Combine(cacheRoot, name);
-            for (var attempt = 0; attempt < 3 && Directory.Exists(path); attempt++)
+            guard = Semaphore.OpenExisting(CacheCleanupGuardName);
+            ownsGuard = guard.WaitOne(0);
+            if (!ownsGuard)
             {
-                try { Directory.Delete(path, true); }
-                catch (IOException) { Thread.Sleep(150); }
-                catch (UnauthorizedAccessException) { Thread.Sleep(150); }
+                guard.Dispose();
+                return;
             }
         }
+        catch (WaitHandleCannotBeOpenedException)
+        {
+            // No other USB Drive Builder instance is preparing media.
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // If Windows will not expose another user's guard, do not risk deleting shared cache data.
+            return;
+        }
+
+        var cacheRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LaptopQAUsbBuilder");
+        try
+        {
+            var cacheNames = preservePreparedMediaForRetry
+                ? Array.Empty<string>()
+                : ["MediaCache", "DriverPackCache", "DriverPayloadCache"];
+            foreach (var name in cacheNames)
+            {
+                var path = Path.Combine(cacheRoot, name);
+                for (var attempt = 0; attempt < 3 && Directory.Exists(path); attempt++)
+                {
+                    try { Directory.Delete(path, true); }
+                    catch (IOException) { Thread.Sleep(150); }
+                    catch (UnauthorizedAccessException) { Thread.Sleep(150); }
+                }
+            }
+        }
+        finally
+        {
+            if (ownsGuard) guard?.Release();
+            guard?.Dispose();
+        }
+    }
+
+    private bool TryAcquireCacheCleanupGuard()
+    {
+        _cacheCleanupGuard = new Semaphore(1, 1, CacheCleanupGuardName);
+        if (_cacheCleanupGuard.WaitOne(0)) return true;
+        _cacheCleanupGuard.Dispose();
+        _cacheCleanupGuard = null;
+        return false;
+    }
+
+    private void ReleaseCacheCleanupGuard()
+    {
+        if (_cacheCleanupGuard is null) return;
+        try { _cacheCleanupGuard.Release(); }
+        catch (SemaphoreFullException) { }
+        finally { _cacheCleanupGuard.Dispose(); _cacheCleanupGuard = null; }
     }
 
     private async Task RefreshDisksAsync()
@@ -138,6 +202,12 @@ public partial class MainWindow : Window
     private async void Build_Click(object sender, RoutedEventArgs e)
     {
         if (_isBuilding || _isPreflighting) return;
+        if (!TryAcquireCacheCleanupGuard())
+        {
+            MessageBox.Show("Another USB Drive Builder instance is preparing or building Windows media. Wait for it to finish before starting another build.",
+                "Build already active", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
         var logFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LaptopQAUsbBuilder", "Logs");
         Directory.CreateDirectory(logFolder);
         _logPath = Path.Combine(logFolder, $"Build-{DateTime.Now:yyyyMMdd-HHmmss}.log");
@@ -158,13 +228,24 @@ public partial class MainWindow : Window
             MessageBox.Show($"The build could not continue.\n\n{ex.Message}\n\nLog: {_logPath}",
                 "Build failed", MessageBoxButton.OK, MessageBoxImage.Error);
         }
-        finally { _buildCancellation?.Dispose(); _buildCancellation = null; SetPreflightState(false); SetBuildingState(false); }
+        finally
+        {
+            _trackingSharedPreparation = false;
+            _buildCancellation?.Dispose();
+            _buildCancellation = null;
+            SetPreflightState(false);
+            SetBuildingState(false);
+            ReleaseCacheCleanupGuard();
+        }
     }
 
     private async Task BuildCoreAsync()
     {
         var queuedDisks = SelectedDisks();
         if (queuedDisks.Count == 0) return;
+        InitializeQueueDriveProgress(queuedDisks);
+        BeginSharedPreparation(_partitions.Any(partition => partition.HasIso) ? 55 : 5);
+        SetSharedPreparationStage(0, 2);
         if (!ValidatePartitionLayout(out var layoutError))
         {
             MessageBox.Show(layoutError, "Invalid partition settings", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -194,6 +275,7 @@ public partial class MainWindow : Window
                 "FAT32 partition too large", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
+        SetSharedPreparationProgress(4);
 
         var folderSources = _partitions.SelectMany(p => p.SourceFolders.Concat(p.DriverFolders))
             .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
@@ -236,16 +318,21 @@ public partial class MainWindow : Window
                     return;
                 }
         }
+        SetSharedPreparationProgress(7);
 
-        foreach (var partition in _partitions.Where(item => item.HasScripts))
+        foreach (var partition in _partitions.Where(item => item.HasScripts || item.GenerateAutounattend))
         {
             try
             {
-                var answerFileSource = partition.AutounattendSource ?? partition.FolderXmlSource;
-                partition.PreparedAutounattendXml = BuildScriptAutounattend(answerFileSource, answerFileSource is null ? _preferences.WindowsSetup : null);
-                AddActivity(string.IsNullOrWhiteSpace(answerFileSource)
-                    ? $"Prepared a generated Autounattend.xml to run scripts for {partition.Name}."
-                    : $"Prepared the selected Autounattend.xml with the script runner for {partition.Name}.");
+                var answerFileSource = partition.GenerateAutounattend ? null : partition.AutounattendSource ?? partition.FolderXmlSource;
+                partition.PreparedAutounattendXml = partition.HasScripts
+                    ? BuildScriptAutounattend(answerFileSource, answerFileSource is null ? _preferences.WindowsSetup : null)
+                    : BuildGeneratedAutounattend(_preferences.WindowsSetup);
+                AddActivity(partition.HasScripts
+                    ? (string.IsNullOrWhiteSpace(answerFileSource)
+                        ? $"Prepared a generated Autounattend.xml to run scripts for {partition.Name}."
+                        : $"Prepared the selected Autounattend.xml with the script runner for {partition.Name}.")
+                    : $"Prepared a generated Autounattend.xml for {partition.Name}.");
             }
             catch (Exception ex)
             {
@@ -254,8 +341,10 @@ public partial class MainWindow : Window
                 return;
             }
         }
+        SetSharedPreparationProgress(9);
 
         await RefreshAllPartitionContentSizesAsync();
+        SetSharedPreparationProgress(11);
 
         foreach (var partition in _partitions.Where(p => p.HasIso))
         {
@@ -268,8 +357,10 @@ public partial class MainWindow : Window
             try
             {
                 SetStatus("Preparing Windows media", "#B36A13");
+                SetSharedPreparationStage(11, 14);
                 BuildProgress.Value = 0;
                 var isoInfo = await InspectBootableIsoAsync(partition.IsoSource!);
+                SetSharedPreparationProgress(14);
                 BuildProgress.Value = 25;
                 if (partition.IsoEditionIndex is not { } editionIndex ||
                     isoInfo.Editions.FirstOrDefault(item => item.Index == editionIndex) is not { } edition)
@@ -294,7 +385,14 @@ public partial class MainWindow : Window
                     partition.DriverFolders.ToArray(), partition.DriverFiles.ToArray(), partition.DriverArchives.ToArray(),
                     partition.ForceUnsignedDrivers);
                 var preparer = new WindowsMediaPreparer(
-                    message => { SetNonTransferActivity(message); AddActivity(message); },
+                    SetMediaPreparationActivity,
+                    UpdateDismActivity,
+                    warning =>
+                    {
+                        SetNonTransferActivity(warning);
+                        AddActivity($"WARNING: {warning}");
+                        Log($"DISM activity warning: {warning}");
+                    },
                     Log, MountIsoAsync, DismountIsoAsync);
                 var prepared = await preparer.PrepareAsync(partition.IsoSource!, isoInfo, selection);
                 partition.PreparedMediaPath = prepared.MediaPath;
@@ -327,6 +425,7 @@ public partial class MainWindow : Window
             }
         }
         BuildProgress.Value = 100;
+        CompleteSharedPreparation();
         UpdatePartitionPreview(queuedDisks);
         var capacityWarnings = GetContentCapacityWarnings(queuedDisks);
         SetStatus(Localization.Text(_preferences.Language, "Ready"), "#147A4B");
@@ -344,8 +443,6 @@ public partial class MainWindow : Window
         InitializeEtaTracking(0, queuedDisks.Count);
         BuildProgress.IsIndeterminate = false;
         BuildProgress.Value = 0;
-        QueueProgress.IsIndeterminate = false;
-        QueueProgress.Value = 0;
 
         var succeeded = 0;
         var failures = new List<string>();
@@ -353,18 +450,23 @@ public partial class MainWindow : Window
         {
             var disk = queuedDisks[queueIndex];
             StartQueueDiskEstimate();
+            SetActiveQueueDrive(queueIndex);
+            var writeStart = _queuePreparationShare;
+            var writeSpan = 100 - writeStart;
+            SetQueueDriveProcessRange(queueIndex, writeStart, writeStart + writeSpan * 0.15);
             SetStatus($"Building {queueIndex + 1} of {queuedDisks.Count}", "#B36A13");
             BuildProgress.IsIndeterminate = false;
             BuildProgress.Value = 0;
-            QueueProgress.Value = 100d * queueIndex / Math.Max(1, queuedDisks.Count);
             SetNonTransferActivity("Preparing drive...");
             try
             {
                 AddActivity($"QUEUE {queueIndex + 1}/{queuedDisks.Count}: Locked target to Disk {disk.Number}: {disk.FriendlyName}.");
-                AddActivity("Clearing existing partitions and creating the requested layout.");
+                SetNonTransferActivity("Clearing the USB partition layout...");
+                AddActivity("Clearing all existing USB partition and volume metadata before creating the requested layout.");
                 var result = await CreatePartitionsAsync(disk);
                 BuildProgress.IsIndeterminate = false;
                 BuildProgress.Value = 100;
+                SetQueueDriveCompletion(queueIndex, writeStart + writeSpan * 0.15);
                 foreach (var partition in _partitions) AddActivity($"Created {partition.Name} ({partition.SizeText}, {partition.FileSystem}).");
                 var copyPartitions = _partitions.Select((partition, index) => (partition, index))
                     .Where(item => item.partition.HasAnyContent).ToList();
@@ -373,16 +475,20 @@ public partial class MainWindow : Window
                     var (partition, partitionIndex) = copyPartitions[copyIndex];
                     if (partitionIndex >= result.Letters.Count || string.IsNullOrWhiteSpace(result.Letters[partitionIndex]))
                         throw new InvalidOperationException($"Windows did not assign a drive letter to {partition.Name}.");
+                    SetQueueDriveProcessRange(queueIndex,
+                        writeStart + writeSpan * (0.15 + 0.75 * copyIndex / Math.Max(1, copyPartitions.Count)),
+                        writeStart + writeSpan * (0.15 + 0.75 * (copyIndex + 1) / Math.Max(1, copyPartitions.Count)));
                     BuildProgress.Value = 0;
                     await CopyPartitionSourcesAsync(partition, $"{result.Letters[partitionIndex]}:\\", 0, 100);
                 }
-                if (copyPartitions.Count == 0) BuildProgress.Value = 100;
+                if (copyPartitions.Count == 0) SetQueueDriveCompletion(queueIndex, writeStart + writeSpan * 0.90);
                 AddActivity("Verifying partition labels and file systems.");
+                SetQueueDriveProcessRange(queueIndex, writeStart + writeSpan * 0.90, 100);
                 SetNonTransferActivity("Verifying partitions...");
                 BuildProgress.Value = 0;
-                await VerifyPartitionsAsync(disk.Number, disk.UniqueId);
+                await VerifyPartitionsAsync(result.DiskNumber, disk.UniqueId);
                 BuildProgress.Value = 100;
-                QueueProgress.Value = 100d * (queueIndex + 1) / Math.Max(1, queuedDisks.Count);
+                CompleteQueueDrive(queueIndex);
                 succeeded++;
                 CompleteQueueDiskEstimate();
                 AddActivity($"Disk {disk.Number} completed and verified.");
@@ -390,6 +496,7 @@ public partial class MainWindow : Window
             }
             catch (Exception ex)
             {
+                FailQueueDrive(queueIndex);
                 CompleteQueueDiskEstimate();
                 failures.Add($"Disk {disk.Number}: {ex.Message}");
                 AddActivity($"Disk {disk.Number} FAILED: {ex.Message}. Continuing queue.");
@@ -397,10 +504,16 @@ public partial class MainWindow : Window
             }
         }
         BuildProgress.IsIndeterminate = false;
-        QueueProgress.Value = 100;
+        _activeQueueDriveIndex = -1;
+        RenderQueueDriveProgress();
         CompleteEtaTracking();
         SetBuildingState(false);
         ConfirmText.Clear();
+        _preservePreparedMediaForRetry = failures.Count > 0 && _partitions.Any(partition =>
+            partition.HasIso && !string.IsNullOrWhiteSpace(partition.PreparedMediaPath) &&
+            Directory.Exists(partition.PreparedMediaPath));
+        if (_preservePreparedMediaForRetry)
+            AddActivity("Prepared Windows media and its supporting driver caches will be retained after close for the next retry.");
         SetStatus(failures.Count == 0 ? "✓ Complete" : "✕ Queue finished with errors", failures.Count == 0 ? "#147A4B" : "#AE3338");
         var failureText = failures.Count == 0 ? "" : $"\n\nFailures:\n{string.Join("\n", failures)}";
         MessageBox.Show($"Queue finished.\n\nSucceeded: {succeeded}\nFailed: {failures.Count}{failureText}\n\nLog: {_logPath}",
@@ -417,13 +530,24 @@ public partial class MainWindow : Window
         script.AppendLine("if($d.BusType -ne 'USB'){throw 'Selected disk is no longer a USB disk.'}");
         script.AppendLine("if($d.IsBoot -or $d.IsSystem){throw 'Refusing to modify a boot or system disk.'}");
         script.AppendLine($"if('{expectedId}' -and [string]$d.UniqueId -ne '{expectedId}'){{throw 'The USB device changed after selection. Refresh and select it again.'}}");
-        script.AppendLine($"if($d.IsReadOnly){{Set-Disk -Number {disk.Number} -IsReadOnly $false}}");
-        script.AppendLine($"if($d.IsOffline){{Set-Disk -Number {disk.Number} -IsOffline $false}}");
-        script.AppendLine($"if($d.PartitionStyle -ne 'RAW'){{Clear-Disk -Number {disk.Number} -RemoveData -RemoveOEM -Confirm:$false}}");
-        script.AppendLine("for($i=0;$i -lt 20;$i++){Update-HostStorageCache -ErrorAction SilentlyContinue;$d=Get-Disk -Number " + disk.Number + ";$partitionCount=@(Get-Partition -DiskNumber " + disk.Number + " -ErrorAction SilentlyContinue).Count;if($d.PartitionStyle -eq 'RAW' -or ($d.PartitionStyle -eq 'MBR' -and $partitionCount -eq 0)){break};Start-Sleep -Milliseconds 250}");
-        script.AppendLine($"$d=Get-Disk -Number {disk.Number};$partitionCount=@(Get-Partition -DiskNumber {disk.Number} -ErrorAction SilentlyContinue).Count");
-        script.AppendLine($"if($d.PartitionStyle -eq 'RAW'){{Initialize-Disk -Number {disk.Number} -PartitionStyle MBR | Out-Null}}elseif($d.PartitionStyle -eq 'MBR' -and $partitionCount -eq 0){{}}elseif($d.PartitionStyle -eq 'GPT'){{throw 'Windows did not clear the GPT partition table. Disconnect and reconnect the USB stick, then retry.'}}else{{throw \"The cleared USB disk is in an unexpected state: $($d.PartitionStyle) with $partitionCount partition(s).\"}}");
-        script.AppendLine($"Update-HostStorageCache -ErrorAction SilentlyContinue;$d=Get-Disk -Number {disk.Number};if($d.PartitionStyle -ne 'MBR'){{throw \"The USB disk could not be prepared as MBR. Windows reports $($d.PartitionStyle).\"}}");
+        script.AppendLine($"if($d.IsReadOnly){{Set-Disk -Number {disk.Number} -IsReadOnly $false -ErrorAction Stop}}");
+        script.AppendLine($"if($d.IsOffline){{Set-Disk -Number {disk.Number} -IsOffline $false -ErrorAction Stop}}");
+        script.AppendLine("$diskpartScript=Join-Path ([IO.Path]::GetTempPath()) ('USBDriveBuilder-'+[guid]::NewGuid().ToString('N')+'.txt')");
+        script.AppendLine("try{");
+        script.AppendLine($"  [IO.File]::WriteAllLines($diskpartScript,[string[]]@('select disk {disk.Number}','attributes disk clear readonly noerr','clean','exit'),[Text.Encoding]::ASCII)");
+        script.AppendLine("  $diskpartOutput=@(& (Join-Path $env:SystemRoot 'System32\\diskpart.exe') /s $diskpartScript 2>&1|ForEach-Object{[string]$_})");
+        script.AppendLine("  $diskpartExit=$LASTEXITCODE");
+        script.AppendLine("}finally{Remove-Item -LiteralPath $diskpartScript -Force -ErrorAction SilentlyContinue}");
+        script.AppendLine("if($diskpartExit -ne 0){$summary=($diskpartOutput|Where-Object{$_}|Select-Object -Last 8)-join ' | ';if($diskpartExit -eq -2147024463){throw 'The USB device disconnected while Windows was writing its partition table (Windows error 433). Reconnect it directly to another USB port. If this repeats, the USB drive cannot reliably accept partition-table writes and should be replaced.'};throw \"DiskPart could not clear the USB partition layout (exit code $diskpartExit). $summary\"}");
+        script.AppendLine("$d=$null;for($i=0;$i -lt 120;$i++){Update-HostStorageCache -ErrorAction SilentlyContinue;$d=@(Get-Disk|Where-Object{[string]$_.UniqueId -eq '" + expectedId + "'}|Select-Object -First 1);if($d){$partitionCount=@(Get-Partition -DiskNumber $d.Number -ErrorAction SilentlyContinue).Count;if($partitionCount -eq 0){break}};Start-Sleep -Milliseconds 500}");
+        script.AppendLine("if(-not $d){throw 'Windows did not rediscover the wiped USB drive. Disconnect and reconnect it, then refresh and retry.'}");
+        script.AppendLine("$diskNumber=$d.Number;$partitionCount=@(Get-Partition -DiskNumber $diskNumber -ErrorAction SilentlyContinue).Count");
+        script.AppendLine("if($d.BusType -ne 'USB' -or $d.IsBoot -or $d.IsSystem){throw 'The target identity or safety state changed after wiping the USB disk.'}");
+        script.AppendLine("if($partitionCount -ne 0){$remainingDetail=(@(Get-Partition -DiskNumber $diskNumber -ErrorAction SilentlyContinue|ForEach-Object{\"Partition $($_.PartitionNumber), offset $($_.Offset), size $($_.Size)\"}) -join ' | ');$summary=($diskpartOutput|Where-Object{$_}|Select-Object -Last 8)-join ' | ';throw \"The full-disk wipe completed but Windows still reports $partitionCount partition(s). $remainingDetail $summary\"}");
+        script.AppendLine("if($d.PartitionStyle -ne 'MBR'){try{Set-Disk -Number $diskNumber -PartitionStyle MBR -ErrorAction Stop}catch{throw 'Windows cleared the USB disk but could not set its empty partition table to MBR: '+$_.Exception.Message}}");
+        script.AppendLine("for($i=0;$i -lt 40;$i++){Update-HostStorageCache -ErrorAction SilentlyContinue;Start-Sleep -Milliseconds 250;$d=Get-Disk -Number $diskNumber;if($d.PartitionStyle -eq 'MBR'){break}}");
+        script.AppendLine("$d=Get-Disk -Number $diskNumber;$partitionCount=@(Get-Partition -DiskNumber $diskNumber -ErrorAction SilentlyContinue).Count");
+        script.AppendLine("if($d.PartitionStyle -ne 'MBR' -or $partitionCount -ne 0){throw \"Windows did not leave the USB disk as an empty MBR disk. It reports $($d.PartitionStyle) with $partitionCount partition(s).\"}");
 
         for (var index = 0; index < _partitions.Count; index++)
         {
@@ -437,7 +561,7 @@ public partial class MainWindow : Window
             else if (item.IsRemaining)
             {
                 var reservedAfter = _partitions.Skip(index + 1).Sum(p => PartitionConfig.TryParseSize(p.SizeText, out var bytes) ? bytes : 0);
-                script.AppendLine($"$remainingSize=[math]::Floor(((Get-Disk -Number {disk.Number}).LargestFreeExtent-{reservedAfter})/1MB)*1MB");
+                script.AppendLine($"$remainingSize=[math]::Floor(((Get-Disk -Number $diskNumber).LargestFreeExtent-{reservedAfter})/1MB)*1MB");
                 script.AppendLine("if($remainingSize -lt 32MB){throw 'The remaining-space partition would be smaller than 32 MB.'}");
                 sizeArgument = "-Size $remainingSize";
             }
@@ -448,16 +572,26 @@ public partial class MainWindow : Window
                     : throw new InvalidOperationException($"Invalid size for partition {index + 1}.");
             }
             var mbrType = item.FileSystem == "FAT32" ? " -MbrType FAT32" : " -MbrType IFS";
-            script.AppendLine($"${variable}=New-Partition -DiskNumber {disk.Number} {sizeArgument} -AssignDriveLetter{mbrType}");
+            script.AppendLine($"${variable}=New-Partition -DiskNumber $diskNumber {sizeArgument} -AssignDriveLetter{mbrType} -ErrorAction Stop");
             var allocation = item.FileSystem == "NTFS" ? " -AllocationUnitSize 4096" : "";
-            script.AppendLine($"${variable} | Format-Volume -FileSystem {item.FileSystem} -NewFileSystemLabel '{PsQuote(item.Name)}'{allocation} -Confirm:$false -Force | Out-Null");
+            script.AppendLine($"try{{Format-Volume -Partition ${variable} -FileSystem {item.FileSystem} -NewFileSystemLabel '{PsQuote(item.Name)}'{allocation} -Confirm:$false -Force -ErrorAction Stop|Out-Null}}catch{{throw 'Failed to format partition {index + 1} ({PsQuote(item.Name)}) as {item.FileSystem}: '+$_.Exception.Message}}");
         }
 
-        script.AppendLine($"Get-Partition -DiskNumber {disk.Number}|Where-Object IsActive|Set-Partition -IsActive $false");
+        script.AppendLine("Get-Partition -DiskNumber $diskNumber|Where-Object IsActive|Set-Partition -IsActive $false");
 
         var letterExpressions = string.Join(",", Enumerable.Range(1, _partitions.Count).Select(number => $"[string](($p{number}|Get-Volume).DriveLetter)"));
-        script.AppendLine($"[pscustomobject]@{{Letters=@({letterExpressions})}} | ConvertTo-Json -Compress");
-        var json = await RunPowerShellAsync(script.ToString());
+        script.AppendLine($"[pscustomobject]@{{DiskNumber=$diskNumber;Letters=@({letterExpressions})}} | ConvertTo-Json -Compress");
+        var wipeStarted = DateTime.UtcNow;
+        var wipeTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        wipeTimer.Tick += (_, _) =>
+        {
+            var elapsed = DateTime.UtcNow - wipeStarted;
+            CurrentEtaText.Text = $"Current activity: Clearing and preparing USB drive — {(int)elapsed.TotalMinutes}:{elapsed.Seconds:00} elapsed";
+        };
+        wipeTimer.Start();
+        string json;
+        try { json = await RunPowerShellAsync(script.ToString()); }
+        finally { wipeTimer.Stop(); }
         return JsonSerializer.Deserialize<PartitionResult>(json, _jsonOptions)
                ?? throw new InvalidOperationException("Windows did not return the new partition drive letters.");
     }
@@ -1253,6 +1387,233 @@ public partial class MainWindow : Window
         UpdateEtaDisplay();
     }
 
+    private void InitializeQueueDriveProgress(IReadOnlyList<UsbDisk> disks)
+    {
+        _queueDriveProgress.Clear();
+        _queueDriveProgress.AddRange(Enumerable.Repeat(QueueDriveProgressState.Pending, disks.Count));
+        _queueDriveCompletion.Clear();
+        _queueDriveCompletion.AddRange(Enumerable.Repeat(0d, disks.Count));
+        _queueProgressDisks.Clear();
+        _queueProgressDisks.AddRange(disks);
+        foreach (var disk in _queueProgressDisks) disk.QueueState = QueueDriveProgressState.Pending;
+        _activeQueueDriveIndex = -1;
+        _activeQueueProcessStart = 0;
+        _activeQueueProcessEnd = 0;
+        RefreshQueueDriveCards();
+        RenderQueueDriveProgress();
+    }
+
+    private void BeginSharedPreparation(double queueShare)
+    {
+        _queuePreparationShare = Math.Clamp(queueShare, 0, 90);
+        _sharedPreparationPercent = 0;
+        _sharedPreparationStageStart = 0;
+        _sharedPreparationStageEnd = 0;
+        _trackingSharedPreparation = true;
+        SetSharedPreparationProgress(0);
+    }
+
+    private void CompleteSharedPreparation()
+    {
+        SetSharedPreparationProgress(100);
+        _trackingSharedPreparation = false;
+    }
+
+    private void SetSharedPreparationStage(double start, double end)
+    {
+        _sharedPreparationStageStart = Math.Clamp(start, 0, 100);
+        _sharedPreparationStageEnd = Math.Clamp(end, _sharedPreparationStageStart, 100);
+        SetSharedPreparationProgress(_sharedPreparationStageStart);
+    }
+
+    private void SetSharedPreparationProgress(double percent)
+    {
+        if (!_trackingSharedPreparation || _queueDriveCompletion.Count == 0) return;
+        _sharedPreparationPercent = Math.Max(_sharedPreparationPercent, Math.Clamp(percent, 0, 100));
+        var queueCompletion = _queuePreparationShare * _sharedPreparationPercent / 100d;
+        for (var index = 0; index < _queueDriveCompletion.Count; index++)
+            _queueDriveCompletion[index] = Math.Max(_queueDriveCompletion[index], queueCompletion);
+        RenderQueueDriveProgress();
+    }
+
+    private void SetMediaPreparationActivity(string message)
+    {
+        var lower = message.ToLowerInvariant();
+        if (lower.StartsWith("using cached ")) SetSharedPreparationStage(94, 100);
+        else if (lower.StartsWith("checking and extracting ")) SetSharedPreparationStage(15, 18);
+        else if (lower.StartsWith("checking compressed driver pack ")) SetSharedPreparationStage(16, 19);
+        else if (lower.StartsWith("extracting compressed driver pack ")) SetSharedPreparationStage(18, 22);
+        else if (lower.StartsWith("expanding ")) SetSharedPreparationStage(20, 25);
+        else if (lower.StartsWith("checking driver packages ")) SetSharedPreparationStage(25, 29);
+        else if (lower.StartsWith("hashing the iso ")) SetSharedPreparationStage(29, 34);
+        else if (lower.StartsWith("preparing windows media ")) SetSharedPreparationStage(34, 37);
+        else if (lower.StartsWith("copying windows iso ")) SetSharedPreparationStage(37, 43);
+        else if (lower.StartsWith("staging selected drivers ")) SetSharedPreparationStage(37, 43);
+        else if (lower.StartsWith("checking ") && lower.Contains("staging duplicates")) SetSharedPreparationStage(40, 44);
+        else if (lower.StartsWith("hashing ") && lower.Contains("driver candidates")) SetSharedPreparationStage(42, 47);
+        else if (lower.StartsWith("creating the deduplicated ")) SetSharedPreparationStage(47, 51);
+        else if (lower.StartsWith("exporting ")) SetSharedPreparationStage(51, 66);
+        else if (lower.StartsWith("mounting ")) SetSharedPreparationStage(66, 70);
+        else if (lower.StartsWith("injecting drivers ")) SetSharedPreparationStage(70, 73);
+        else if (lower.StartsWith("injecting driver folder ") || lower.StartsWith("injecting individual driver ")) SetSharedPreparationStage(73, 84);
+        else if (lower.StartsWith("retrying ")) SetSharedPreparationStage(76, 84);
+        else if (lower.StartsWith("committing ")) SetSharedPreparationStage(84, 98);
+        else if (lower.StartsWith("prepared ")) SetSharedPreparationStage(98, 100);
+        SetNonTransferActivity(message);
+        BuildProgress.IsIndeterminate = false;
+        BuildProgress.Value = 0;
+        AddActivity(message);
+    }
+
+    private void ClearQueueDriveProgress()
+    {
+        _queueDriveProgress.Clear();
+        _queueDriveCompletion.Clear();
+        foreach (var disk in _queueProgressDisks) disk.QueueState = QueueDriveProgressState.Pending;
+        _queueProgressDisks.Clear();
+        _activeQueueDriveIndex = -1;
+        _activeQueueProcessStart = 0;
+        _activeQueueProcessEnd = 0;
+        RefreshQueueDriveCards();
+        RenderQueueDriveProgress();
+    }
+
+    private void SetActiveQueueDrive(int index)
+    {
+        if (index < 0 || index >= _queueDriveProgress.Count) return;
+        if (_activeQueueDriveIndex >= 0 && _activeQueueDriveIndex < _queueDriveProgress.Count &&
+            _queueDriveProgress[_activeQueueDriveIndex] == QueueDriveProgressState.Active)
+        {
+            _queueDriveProgress[_activeQueueDriveIndex] = QueueDriveProgressState.Pending;
+            _queueProgressDisks[_activeQueueDriveIndex].QueueState = QueueDriveProgressState.Pending;
+        }
+        _activeQueueDriveIndex = index;
+        _activeQueueProcessStart = 0;
+        _activeQueueProcessEnd = 0;
+        _queueDriveProgress[index] = QueueDriveProgressState.Active;
+        _queueProgressDisks[index].QueueState = QueueDriveProgressState.Active;
+        RefreshQueueDriveCards();
+        RenderQueueDriveProgress();
+    }
+
+    private void CompleteQueueDrive(int index)
+    {
+        if (index < 0 || index >= _queueDriveProgress.Count) return;
+        SetQueueDriveCompletion(index, 100);
+        _queueDriveProgress[index] = QueueDriveProgressState.Completed;
+        _queueProgressDisks[index].QueueState = QueueDriveProgressState.Completed;
+        if (_activeQueueDriveIndex == index) _activeQueueDriveIndex = -1;
+        RefreshQueueDriveCards();
+        RenderQueueDriveProgress();
+    }
+
+    private void FailQueueDrive(int index)
+    {
+        if (index < 0 || index >= _queueDriveProgress.Count) return;
+        _queueDriveProgress[index] = QueueDriveProgressState.Failed;
+        _queueProgressDisks[index].QueueState = QueueDriveProgressState.Failed;
+        if (_activeQueueDriveIndex == index) _activeQueueDriveIndex = -1;
+        RefreshQueueDriveCards();
+        RenderQueueDriveProgress();
+    }
+
+    private void SetQueueDriveProcessRange(int index, double start, double end)
+    {
+        if (index < 0 || index >= _queueDriveCompletion.Count) return;
+        _activeQueueDriveIndex = index;
+        _activeQueueProcessStart = Math.Clamp(start, 0, 100);
+        _activeQueueProcessEnd = Math.Clamp(end, _activeQueueProcessStart, 100);
+        SetQueueDriveCompletion(index, _activeQueueProcessStart);
+    }
+
+    private void SetQueueDriveCompletion(int index, double value)
+    {
+        if (index < 0 || index >= _queueDriveCompletion.Count) return;
+        var clamped = Math.Clamp(value, 0, 100);
+        if (Math.Abs(_queueDriveCompletion[index] - clamped) < 0.25) return;
+        _queueDriveCompletion[index] = clamped;
+        RenderQueueDriveProgress();
+    }
+
+    private void BuildProgress_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_trackingSharedPreparation)
+        {
+            var preparationFraction = Math.Clamp(e.NewValue / 100d, 0, 1);
+            SetSharedPreparationProgress(_sharedPreparationStageStart +
+                (_sharedPreparationStageEnd - _sharedPreparationStageStart) * preparationFraction);
+            return;
+        }
+        if (_activeQueueDriveIndex < 0 || _activeQueueDriveIndex >= _queueDriveCompletion.Count ||
+            _activeQueueProcessEnd <= _activeQueueProcessStart) return;
+        var fraction = Math.Clamp(e.NewValue / 100d, 0, 1);
+        SetQueueDriveCompletion(_activeQueueDriveIndex,
+            _activeQueueProcessStart + (_activeQueueProcessEnd - _activeQueueProcessStart) * fraction);
+    }
+
+    private void RenderQueueDriveProgress()
+    {
+        if (QueueProgressSegments is null) return;
+        QueueProgressSegments.Children.Clear();
+        QueueProgressSegments.ColumnDefinitions.Clear();
+        var selected = GetThemeBrush("DriveSelectedBorder", Color.FromRgb(32, 184, 106));
+        var pending = GetThemeBrush("ThemeShellStroke", Color.FromRgb(217, 226, 223));
+        var failed = GetThemeBrush("DriveFailedBackground", Color.FromRgb(199, 94, 99));
+        for (var index = 0; index < _queueDriveProgress.Count; index++)
+        {
+            QueueProgressSegments.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            var state = _queueDriveProgress[index];
+            Brush background = state switch
+            {
+                QueueDriveProgressState.Active => CreateStripedDriveBrush(selected.Color),
+                QueueDriveProgressState.Completed => new SolidColorBrush(Darken(selected.Color, 0.58)),
+                QueueDriveProgressState.Failed => failed,
+                _ => pending
+            };
+            var status = state switch
+            {
+                QueueDriveProgressState.Active => "Writing",
+                QueueDriveProgressState.Completed => "Completed",
+                QueueDriveProgressState.Failed => "Failed",
+                _ => "Waiting"
+            };
+            var completion = index < _queueDriveCompletion.Count ? _queueDriveCompletion[index] : 0;
+            if (state is QueueDriveProgressState.Completed or QueueDriveProgressState.Failed) completion = 100;
+            var track = new Border
+            {
+                Background = pending,
+                CornerRadius = new CornerRadius(4),
+                Margin = index == 0 ? new Thickness(0) : new Thickness(2, 0, 0, 0),
+                ToolTip = $"Drive {index + 1}: {status}"
+            };
+            var fill = new Border { Background = background, CornerRadius = new CornerRadius(4), HorizontalAlignment = HorizontalAlignment.Left };
+            track.Child = fill;
+            track.SizeChanged += (_, _) => fill.Width = Math.Max(0, track.ActualWidth * completion / 100d);
+            track.Loaded += (_, _) => fill.Width = Math.Max(0, track.ActualWidth * completion / 100d);
+            Grid.SetColumn(track, index);
+            QueueProgressSegments.Children.Add(track);
+        }
+    }
+
+    private void RefreshQueueDriveCards() => DiskPicker?.Items.Refresh();
+
+    private SolidColorBrush GetThemeBrush(string resourceKey, Color fallback) =>
+        TryFindResource(resourceKey) as SolidColorBrush ?? new SolidColorBrush(fallback);
+
+    private static Color Darken(Color color, double factor) => Color.FromRgb(
+        (byte)Math.Clamp((int)Math.Round(color.R * factor), 0, 255),
+        (byte)Math.Clamp((int)Math.Round(color.G * factor), 0, 255),
+        (byte)Math.Clamp((int)Math.Round(color.B * factor), 0, 255));
+
+    private static Brush CreateStripedDriveBrush(Color green)
+    {
+        var dark = Darken(green, 0.58);
+        return new LinearGradientBrush(
+            [new GradientStop(green, 0), new GradientStop(green, 0.48), new GradientStop(dark, 0.49),
+             new GradientStop(dark, 0.72), new GradientStop(green, 0.73), new GradientStop(green, 1)],
+            new Point(0, 0), new Point(0.12, 0.12)) { SpreadMethod = GradientSpreadMethod.Repeat };
+    }
+
     private void BeginTransferActivity(string name, long totalBytes, double startProgress, double endProgress)
     {
         var now = DateTime.UtcNow;
@@ -1285,6 +1646,16 @@ public partial class MainWindow : Window
     {
         EndTransferActivity();
         CurrentEtaText.Text = $"Current activity: {text}";
+    }
+
+    private void UpdateDismActivity(string text, double? percent)
+    {
+        SetNonTransferActivity(text);
+        BuildProgress.IsIndeterminate = false;
+        if (percent.HasValue)
+            BuildProgress.Value = Math.Clamp(percent.Value, 0, 100);
+        else
+            BuildProgress.Value = 0;
     }
 
     private void ReportTransferBytes(long bytes)
@@ -1358,8 +1729,6 @@ public partial class MainWindow : Window
             BuildProgress.Value = progressStart + (progressEnd - progressStart) * fraction;
             CurrentEtaText.Text = $"Current activity: {activityName} ({fraction:P0})";
         }
-        if (queueTotal > 0)
-            QueueProgress.Value = Math.Clamp(100d * queueCopied / queueTotal, 0, 100);
     }
 
     private void CompleteEtaTracking()
@@ -1496,8 +1865,7 @@ public partial class MainWindow : Window
             SetStatus("Preparing build", "#B36A13");
             BuildProgress.IsIndeterminate = false;
             BuildProgress.Value = 0;
-            QueueProgress.IsIndeterminate = false;
-            QueueProgress.Value = 0;
+            ClearQueueDriveProgress();
             CurrentEtaText.Text = "Current activity: Checking targets, sources, and ISO media...";
             QueueEtaText.Visibility = Visibility.Collapsed;
             AddActivity("Preparing build: checking targets, sources, and ISO media before erasure.");
@@ -1506,8 +1874,7 @@ public partial class MainWindow : Window
         {
             BuildProgress.IsIndeterminate = false;
             BuildProgress.Value = 0;
-            QueueProgress.IsIndeterminate = false;
-            QueueProgress.Value = 0;
+            if (_queueDriveProgress.Count == 0) ClearQueueDriveProgress();
             CurrentEtaText.Text = "Current activity: Waiting";
             SetStatus(Localization.Text(_preferences.Language, "Ready"), "#147A4B");
         }
@@ -2071,6 +2438,8 @@ public partial class MainWindow : Window
         var dialog = new PartitionContentDialog(partition, _preferences.Theme) { Owner = this };
         dialog.ActionHandler = async (action, owner) => await HandlePartitionContentActionAsync(partition, action, owner);
         dialog.ShowDialog();
+        await RefreshPartitionContentSizeAsync(partition, true);
+        PartitionConfigurationChanged();
     }
 
     private async Task HandlePartitionContentActionAsync(PartitionConfig partition, PartitionContentAction action, Window owner)
@@ -2107,6 +2476,7 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(owner) != true) return;
         PickerLocationStore.Set("XML", Path.GetDirectoryName(dialog.FileName));
         partition.AutounattendSource = dialog.FileName;
+        partition.GenerateAutounattend = false;
         partition.PreparedAutounattendXml = null;
         await RefreshPartitionContentSizeAsync(partition, true); UpdateBuildButton();
     }
@@ -2208,7 +2578,7 @@ public partial class MainWindow : Window
     {
         if ((sender as FrameworkElement)?.DataContext is not PartitionConfig partition || !partition.HasAnyContent) return;
         if (MessageBox.Show($"Clear all selected content for {partition.Name}?", "Clear partition content", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
-        partition.SourceFiles.Clear(); partition.SourceFolders.Clear(); partition.AutounattendSource = null; partition.ClearIsoSelection(); partition.SelectedContentBytes = 0; partition.LargestSelectedFileBytes = 0; MainPartitionList.Items.Refresh(); UpdatePartitionPreview(SelectedDisks()); UpdateBuildButton();
+        partition.SourceFiles.Clear(); partition.SourceFolders.Clear(); partition.AutounattendSource = null; partition.GenerateAutounattend = false; partition.ClearIsoSelection(); partition.SelectedContentBytes = 0; partition.LargestSelectedFileBytes = 0; MainPartitionList.Items.Refresh(); UpdatePartitionPreview(SelectedDisks()); UpdateBuildButton();
     }
 }
 
@@ -2224,6 +2594,7 @@ public sealed class UsbDisk
     public bool IsBoot { get; set; }
     public bool IsSystem { get; set; }
     public string? DriveLetters { get; set; }
+    public QueueDriveProgressState QueueState { get; set; }
     public string DiskTitle => string.IsNullOrWhiteSpace(DriveLetters) ? $"Disk {Number}" : $"Disk {Number}  |  {DriveLetters}";
     public string SizeDisplay => $"{Size / (1024d * 1024 * 1024):N2} GB";
     public string Display => $"Disk {Number}  |  {FriendlyName}  |  {Size / (1024d * 1024 * 1024):N2} GB";
@@ -2231,5 +2602,14 @@ public sealed class UsbDisk
 
 public sealed class PartitionResult
 {
+    public int DiskNumber { get; set; }
     public List<string> Letters { get; set; } = [];
+}
+
+public enum QueueDriveProgressState
+{
+    Pending,
+    Active,
+    Completed,
+    Failed
 }

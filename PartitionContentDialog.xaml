@@ -59,8 +59,11 @@
                         <TextBlock Text="Windows ISO content" FontSize="14" FontWeight="SemiBold" Margin="0,2,0,2"/>
                         <TextBlock Foreground="{DynamicResource ThemeMuted}" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,9">
                             <Run Text="Drivers are injected into Windows. Scripts and supporting files run before OOBE."/><LineBreak/>
-                            <Run Text="If no XML is selected, Autounattend.xml is created automatically."/>
+                            <Run Text="Generate an XML from the Windows Setup defaults in Config when needed."/>
                         </TextBlock>
+                        <CheckBox x:Name="GenerateAutounattendCheckBox" Content="Generate Autounattend.xml" Margin="0,0,0,10"
+                                  Checked="GenerateAutounattend_Checked" Unchecked="GenerateAutounattend_Unchecked"
+                                  ToolTip="Create a new Autounattend.xml using the Generated Windows Setup defaults in Config."/>
                         <UniformGrid Columns="2">
                             <Button x:Name="DriversButton" Content="Drivers" Click="Drivers_Click" Margin="0,0,7,0"
                                     ToolTip="Select drivers now; they will be injected after a Windows ISO is added"/>

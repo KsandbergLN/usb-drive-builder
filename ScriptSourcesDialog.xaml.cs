@@ -94,6 +94,7 @@ public partial class ScriptSourcesDialog : Window
     {
         if (e.ChangedButton == MouseButton.Left) DragMove();
     }
+
 }
 
 public sealed record ScriptSourceItem(string Path)
