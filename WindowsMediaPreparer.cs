@@ -17,6 +17,7 @@ public sealed class WindowsMediaPreparer
     private readonly Action<string> _log;
     private readonly Func<string, Task<string>> _mountIso;
     private readonly Func<string, Task> _dismountIso;
+    private readonly CancellationToken _cancellationToken;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _driverPackLocks =
         new(StringComparer.OrdinalIgnoreCase);
     private static readonly int FileHashParallelism = Math.Clamp(Environment.ProcessorCount / 2, 2, 4);
@@ -26,7 +27,8 @@ public sealed class WindowsMediaPreparer
 
     public WindowsMediaPreparer(Action<string> activity, Action<string, double?> dismActivity,
         Action<string> dismWarning, Action<string> log,
-        Func<string, Task<string>> mountIso, Func<string, Task> dismountIso)
+        Func<string, Task<string>> mountIso, Func<string, Task> dismountIso,
+        CancellationToken cancellationToken)
     {
         _activity = activity;
         _dismActivity = dismActivity;
@@ -34,10 +36,12 @@ public sealed class WindowsMediaPreparer
         _log = log;
         _mountIso = mountIso;
         _dismountIso = dismountIso;
+        _cancellationToken = cancellationToken;
     }
 
     public async Task<PreparedWindowsMedia> PrepareAsync(string isoPath, BootableIsoInfo info, WindowsIsoSelection selection)
     {
+        _cancellationToken.ThrowIfCancellationRequested();
         if (selection.AddDrivers)
         {
             foreach (var folder in selection.DriverFolders)
@@ -47,9 +51,12 @@ public sealed class WindowsMediaPreparer
             foreach (var archive in selection.DriverArchives)
                 if (!File.Exists(archive)) throw new InvalidOperationException($"A selected compressed driver pack is no longer available: {archive}");
             selection = await ResolveDriverPacksAsync(selection);
+            _cancellationToken.ThrowIfCancellationRequested();
             selection = await ResolveCompressedDriverPayloadsAsync(selection);
+            _cancellationToken.ThrowIfCancellationRequested();
             ValidateDriverPackages(selection);
         }
+        _cancellationToken.ThrowIfCancellationRequested();
         var cacheKey = await CreateCacheKeyAsync(isoPath, selection);
         var cacheRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "LaptopQAUsbBuilder", "MediaCache", cacheKey);
@@ -58,6 +65,7 @@ public sealed class WindowsMediaPreparer
         var rejectionReport = Path.Combine(cacheRoot, "driver-rejections.json");
         if (File.Exists(completeMarker) && IsCompleteWindowsMedia(cachedMedia))
         {
+            WriteEditionConfiguration(cachedMedia, selection);
             _activity($"Using cached {selection.EditionName} Windows media.");
             _log($"Windows media cache hit: {cacheKey}");
             return new PreparedWindowsMedia(cachedMedia, CalculateDirectoryBytes(cachedMedia), true, cacheKey,
@@ -81,6 +89,7 @@ public sealed class WindowsMediaPreparer
                 : Task.FromResult(selection);
             var mediaCopyTask = CopyIsoToStagingAsync(isoPath, mediaRoot);
             await Task.WhenAll(driverStagingTask, mediaCopyTask);
+            _cancellationToken.ThrowIfCancellationRequested();
             selection = await driverStagingTask;
 
             var sources = Path.Combine(mediaRoot, "sources");
@@ -94,6 +103,7 @@ public sealed class WindowsMediaPreparer
             var finalInstallImage = Path.Combine(sources, "install.wim");
             if (!sourceInstallImage.Equals(finalInstallImage, StringComparison.OrdinalIgnoreCase) && File.Exists(finalInstallImage)) File.Delete(finalInstallImage);
             File.Move(selectedInstallImage, finalInstallImage);
+            WriteEditionConfiguration(mediaRoot, selection);
 
             var driverRejections = new List<DriverInjectionRejection>();
             if (selection.AddDrivers)
@@ -186,7 +196,12 @@ public sealed class WindowsMediaPreparer
         {
             if (mounted)
             {
-                try { await RunDismAsync($"/Unmount-Image /MountDir:\"{mountPath}\" /Discard"); }
+                try
+                {
+                    _dismActivity("Cancelling Windows servicing — discarding mounted image", null);
+                    await RunDismAsync($"/Unmount-Image /MountDir:\"{mountPath}\" /Discard",
+                        operationName: "Discarding mounted Windows image", cancellationToken: CancellationToken.None);
+                }
                 catch (Exception cleanupError) { _log($"DISM cleanup warning: {LogSanitizer.SanitizeException(cleanupError)}"); }
             }
             TryDeleteDirectory(mountPath);
@@ -197,7 +212,7 @@ public sealed class WindowsMediaPreparer
 
     private async Task<DismRunOutcome> RunDismAsync(string arguments, int? driverPackageCount = null,
         bool allowAllRejectedDrivers = false, string? operationName = null,
-        IReadOnlyList<string>? activityPaths = null)
+        IReadOnlyList<string>? activityPaths = null, CancellationToken? cancellationToken = null)
     {
         _log($"DISM {arguments}");
         var logFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -214,7 +229,8 @@ public sealed class WindowsMediaPreparer
         };
         using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start DISM.");
         var operation = operationName ?? DescribeDismOperation(arguments);
-        var monitored = await MonitorDismProcessAsync(process, operation, dismLog, activityPaths ?? []);
+        var effectiveCancellation = cancellationToken ?? _cancellationToken;
+        var monitored = await MonitorDismProcessAsync(process, operation, dismLog, activityPaths ?? [], effectiveCancellation);
         var output = monitored.Output;
         var error = monitored.Error;
         if (process.ExitCode == 0)
@@ -264,7 +280,7 @@ public sealed class WindowsMediaPreparer
     }
 
     private async Task<DismProcessOutput> MonitorDismProcessAsync(Process process, string operation,
-        string dismLog, IReadOnlyList<string> activityPaths)
+        string dismLog, IReadOnlyList<string> activityPaths, CancellationToken cancellationToken)
     {
         var latestPercentBits = BitConverter.DoubleToInt64Bits(double.NaN);
         long progressSignal = 0;
@@ -287,46 +303,61 @@ public sealed class WindowsMediaPreparer
         var warned = false;
         _dismActivity($"{operation} — 0:00 elapsed", null);
 
-        while (!waitTask.IsCompleted)
+        try
         {
-            if (await Task.WhenAny(waitTask, Task.Delay(1000)) == waitTask) break;
-
-            var cpu = SafeProcessorTime(process);
-            var io = SafeIoBytes(process);
-            var fileActivity = GetFileActivitySignature(watchedPaths);
-            var currentProgressSignal = Interlocked.Read(ref progressSignal);
-            var active = cpu > lastCpu || io > lastIo || fileActivity != lastFileActivity ||
-                         currentProgressSignal != lastProgressSignal;
-            if (active)
+            while (!waitTask.IsCompleted)
             {
-                lastActivity = stopwatch.Elapsed;
-                if (warned)
-                    _log($"DISM activity resumed during {operation} after {FormatElapsed(stopwatch.Elapsed)} elapsed.");
-                warned = false;
+                cancellationToken.ThrowIfCancellationRequested();
+                if (await Task.WhenAny(waitTask, Task.Delay(1000, cancellationToken)) == waitTask) break;
+
+                var cpu = SafeProcessorTime(process);
+                var io = SafeIoBytes(process);
+                var fileActivity = GetFileActivitySignature(watchedPaths);
+                var currentProgressSignal = Interlocked.Read(ref progressSignal);
+                var active = cpu > lastCpu || io > lastIo || fileActivity != lastFileActivity ||
+                             currentProgressSignal != lastProgressSignal;
+                if (active)
+                {
+                    lastActivity = stopwatch.Elapsed;
+                    if (warned)
+                        _log($"DISM activity resumed during {operation} after {FormatElapsed(stopwatch.Elapsed)} elapsed.");
+                    warned = false;
+                }
+
+                lastCpu = cpu;
+                lastIo = io;
+                lastFileActivity = fileActivity;
+                lastProgressSignal = currentProgressSignal;
+                var quietFor = stopwatch.Elapsed - lastActivity;
+                if (!warned && quietFor >= TimeSpan.FromMinutes(10))
+                {
+                    var warning = $"{operation} has shown no CPU, I/O, file, or reported progress for 10 minutes. It may be stalled; waiting continues automatically.";
+                    _dismWarning(warning);
+                    warned = true;
+                }
+
+                var percentValue = BitConverter.Int64BitsToDouble(Interlocked.Read(ref latestPercentBits));
+                double? percent = double.IsNaN(percentValue) ? null : Math.Clamp(percentValue, 0, 100);
+                var state = warned
+                    ? " — no activity detected; waiting continues"
+                    : quietFor >= TimeSpan.FromSeconds(5) ? " — DISM is still working" : "";
+                _dismActivity($"{operation} — {FormatElapsed(stopwatch.Elapsed)} elapsed{state}", percent);
             }
 
-            lastCpu = cpu;
-            lastIo = io;
-            lastFileActivity = fileActivity;
-            lastProgressSignal = currentProgressSignal;
-            var quietFor = stopwatch.Elapsed - lastActivity;
-            if (!warned && quietFor >= TimeSpan.FromMinutes(10))
-            {
-                var warning = $"{operation} has shown no CPU, I/O, file, or reported progress for 10 minutes. It may be stalled; waiting continues automatically.";
-                _dismWarning(warning);
-                warned = true;
-            }
-
-            var percentValue = BitConverter.Int64BitsToDouble(Interlocked.Read(ref latestPercentBits));
-            double? percent = double.IsNaN(percentValue) ? null : Math.Clamp(percentValue, 0, 100);
-            var state = warned
-                ? " — no activity detected; waiting continues"
-                : quietFor >= TimeSpan.FromSeconds(5) ? " — DISM is still working" : "";
-            _dismActivity($"{operation} — {FormatElapsed(stopwatch.Elapsed)} elapsed{state}", percent);
+            await waitTask.WaitAsync(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            return new DismProcessOutput(await outputTask, await errorTask);
         }
-
-        await waitTask;
-        return new DismProcessOutput(await outputTask, await errorTask);
+        catch (OperationCanceledException)
+        {
+            _dismActivity($"Cancelling {operation} — stopping DISM", null);
+            try { if (!process.HasExited) process.Kill(true); }
+            catch (InvalidOperationException) { }
+            catch (System.ComponentModel.Win32Exception) { }
+            try { await process.WaitForExitAsync(CancellationToken.None); }
+            catch { }
+            throw;
+        }
     }
 
     private static async Task<string> ReadDismStreamAsync(StreamReader reader, Action<double> reportPercent)
@@ -501,7 +532,7 @@ public sealed class WindowsMediaPreparer
         var cacheRoot = Path.Combine(cacheParent, archiveHash);
         var completeMarker = Path.Combine(cacheRoot, ".complete");
         var packLock = _driverPackLocks.GetOrAdd(archiveHash, _ => new SemaphoreSlim(1, 1));
-        await packLock.WaitAsync();
+        await packLock.WaitAsync(_cancellationToken);
         try
         {
         if (File.Exists(completeMarker) && Directory.Exists(cacheRoot) &&
@@ -518,7 +549,7 @@ public sealed class WindowsMediaPreparer
         {
             _activity($"Extracting compressed driver pack {Path.GetFileName(archivePath)}...");
             if (extension.Equals(".zip", StringComparison.OrdinalIgnoreCase))
-                await Task.Run(() => ExtractZipSafely(archivePath, temporaryRoot));
+                await ExtractZipSafelyAsync(archivePath, temporaryRoot);
             else
                 await ExtractCabAsync(archivePath, temporaryRoot);
 
@@ -552,12 +583,13 @@ public sealed class WindowsMediaPreparer
         }
     }
 
-    private static void ExtractZipSafely(string archivePath, string destinationRoot)
+    private async Task ExtractZipSafelyAsync(string archivePath, string destinationRoot)
     {
         var safeRoot = Path.GetFullPath(destinationRoot) + Path.DirectorySeparatorChar;
         using var archive = ZipFile.OpenRead(archivePath);
         foreach (var entry in archive.Entries)
         {
+            _cancellationToken.ThrowIfCancellationRequested();
             var destination = Path.GetFullPath(Path.Combine(destinationRoot,
                 entry.FullName.Replace('/', Path.DirectorySeparatorChar)));
             if (!destination.StartsWith(safeRoot, StringComparison.OrdinalIgnoreCase))
@@ -568,11 +600,14 @@ public sealed class WindowsMediaPreparer
                 continue;
             }
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-            entry.ExtractToFile(destination, true);
+            await using var input = entry.Open();
+            await using var output = new FileStream(destination, FileMode.Create, FileAccess.Write, FileShare.None,
+                1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            await input.CopyToAsync(output, 1024 * 1024, _cancellationToken);
         }
     }
 
-    private static async Task ExtractCabAsync(string archivePath, string destinationRoot)
+    private async Task ExtractCabAsync(string archivePath, string destinationRoot)
     {
         var start = new ProcessStartInfo
         {
@@ -588,7 +623,12 @@ public sealed class WindowsMediaPreparer
         using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start the Windows CAB extraction tool.");
         var outputTask = process.StandardOutput.ReadToEndAsync();
         var errorTask = process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
+        try { await process.WaitForExitAsync(_cancellationToken); }
+        catch (OperationCanceledException)
+        {
+            try { if (!process.HasExited) process.Kill(true); } catch { }
+            throw;
+        }
         var output = await outputTask;
         var error = await errorTask;
         if (process.ExitCode != 0)
@@ -612,11 +652,15 @@ public sealed class WindowsMediaPreparer
 
         var folders = new List<string>();
         foreach (var folder in selection.DriverFolders.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            _cancellationToken.ThrowIfCancellationRequested();
             folders.Add(await ResolveRootAsync(folder));
+        }
 
         var files = new List<string>();
         foreach (var file in selection.DriverFiles.Distinct(StringComparer.OrdinalIgnoreCase))
         {
+            _cancellationToken.ThrowIfCancellationRequested();
             var parent = Path.GetDirectoryName(file) ?? throw new InvalidOperationException($"The selected INF path is invalid: {file}");
             var resolvedParent = await ResolveRootAsync(parent);
             files.Add(Path.Combine(resolvedParent, Path.GetRelativePath(parent, file)));
@@ -635,7 +679,11 @@ public sealed class WindowsMediaPreparer
         }
         finally
         {
-            await _dismountIso(isoPath);
+            try { await _dismountIso(isoPath); }
+            catch (Exception ex) when (_cancellationToken.IsCancellationRequested)
+            {
+                _log($"ISO dismount cleanup warning after cancellation: {LogSanitizer.SanitizeException(ex)}");
+            }
         }
     }
 
@@ -702,7 +750,7 @@ public sealed class WindowsMediaPreparer
                     return new DriverStageFile(sourcePath,
                         Path.Combine(root.Value, Path.GetRelativePath(root.Key, sourcePath)), info.Length);
                 }))
-            .ToArray());
+            .ToArray(), _cancellationToken);
 
         _activity($"Checking {entries.Length:N0} driver files for exact staging duplicates...");
         var contentKeys = new ConcurrentDictionary<string, DriverContentKey>(StringComparer.OrdinalIgnoreCase);
@@ -731,7 +779,7 @@ public sealed class WindowsMediaPreparer
         {
             _activity($"Hashing {hashCandidates.Count:N0} duplicate-size driver candidates with up to {FileHashParallelism} workers...");
             await Parallel.ForEachAsync(hashCandidates,
-                new ParallelOptions { MaxDegreeOfParallelism = FileHashParallelism },
+                new ParallelOptions { MaxDegreeOfParallelism = FileHashParallelism, CancellationToken = _cancellationToken },
                 async (candidate, _) =>
                 {
                     contentKeys[candidate.SourcePath] = new DriverContentKey(candidate.Length,
@@ -747,6 +795,7 @@ public sealed class WindowsMediaPreparer
             var canonicalByContent = new Dictionary<DriverContentKey, string>();
             foreach (var entry in entries)
             {
+                _cancellationToken.ThrowIfCancellationRequested();
                 Directory.CreateDirectory(Path.GetDirectoryName(entry.StagedPath)!);
                 var key = contentKeys[entry.SourcePath];
                 if (canonicalByContent.TryGetValue(key, out var canonical) &&
@@ -759,10 +808,10 @@ public sealed class WindowsMediaPreparer
                     continue;
                 }
 
-                File.Copy(entry.SourcePath, entry.StagedPath, true);
+                CopyFileCancellable(entry.SourcePath, entry.StagedPath);
                 canonicalByContent.TryAdd(key, entry.StagedPath);
             }
-        });
+        }, _cancellationToken);
 
         var duplicateInfRedirects = FindDuplicateInfPackages(entries, contentKeys);
         var suppressed = 0;
@@ -940,7 +989,7 @@ public sealed class WindowsMediaPreparer
             {
                 lastError = ex;
                 _log($"{description} cache publish attempt {attempt}/6 was blocked: {LogSanitizer.SanitizeException(ex)}");
-                if (attempt < 6) await Task.Delay(attempt * 350);
+                if (attempt < 6) await Task.Delay(attempt * 350, _cancellationToken);
             }
         }
         _log($"Could not publish {description} cache after retries: {LogSanitizer.SanitizeException(lastError!)}");
@@ -954,7 +1003,7 @@ public sealed class WindowsMediaPreparer
         return Path.Combine(Path.GetDirectoryName(expectedPath) ?? "", fileName[..^1] + "_");
     }
 
-    private static async Task ExpandCompressedFileAsync(string compressedPath, string destinationPath)
+    private async Task ExpandCompressedFileAsync(string compressedPath, string destinationPath)
     {
         var start = new ProcessStartInfo
         {
@@ -969,7 +1018,12 @@ public sealed class WindowsMediaPreparer
         using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start the Windows compressed-file expansion tool.");
         var outputTask = process.StandardOutput.ReadToEndAsync();
         var errorTask = process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
+        try { await process.WaitForExitAsync(_cancellationToken); }
+        catch (OperationCanceledException)
+        {
+            try { if (!process.HasExited) process.Kill(true); } catch { }
+            throw;
+        }
         var output = await outputTask;
         var error = await errorTask;
         if (process.ExitCode != 0)
@@ -989,7 +1043,7 @@ public sealed class WindowsMediaPreparer
             .ToArray();
         var scanResults = new IncompleteDriverPackage[infFiles.Length];
         Parallel.For(0, infFiles.Length,
-            new ParallelOptions { MaxDegreeOfParallelism = PackageScanParallelism },
+            new ParallelOptions { MaxDegreeOfParallelism = PackageScanParallelism, CancellationToken = _cancellationToken },
             index => scanResults[index] = FindMissingDriverFiles(infFiles[index]));
         var incomplete = scanResults
             .Where(result => result.MissingFiles.Count > 0)
@@ -1199,6 +1253,7 @@ public sealed class WindowsMediaPreparer
     {
         _activity("Hashing the ISO for media cache reuse...");
         var isoHash = await HashFileAsync(isoPath);
+        _cancellationToken.ThrowIfCancellationRequested();
         var driverManifest = selection.AddDrivers
             ? CreateDriverManifest(selection.DriverFolders, selection.DriverFiles)
             : "NO_DRIVERS";
@@ -1207,19 +1262,20 @@ public sealed class WindowsMediaPreparer
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(descriptor))).ToLowerInvariant();
     }
 
-    private static async Task<string> HashFileAsync(string path)
+    private async Task<string> HashFileAsync(string path)
     {
         await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024,
             FileOptions.Asynchronous | FileOptions.SequentialScan);
         using var hash = SHA256.Create();
-        return Convert.ToHexString(await hash.ComputeHashAsync(stream));
+        return Convert.ToHexString(await hash.ComputeHashAsync(stream, _cancellationToken));
     }
 
-    private static string CreateDriverManifest(string root)
+    private string CreateDriverManifest(string root)
     {
         var entries = Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
             .Select(path =>
             {
+                _cancellationToken.ThrowIfCancellationRequested();
                 var info = new FileInfo(path);
                 return $"{Path.GetRelativePath(root, path).ToUpperInvariant()}|{info.Length}|{info.LastWriteTimeUtc.Ticks}";
             })
@@ -1228,12 +1284,13 @@ public sealed class WindowsMediaPreparer
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", entries))));
     }
 
-    private static string CreateDriverManifest(IEnumerable<string> folders, IEnumerable<string> files)
+    private string CreateDriverManifest(IEnumerable<string> folders, IEnumerable<string> files)
     {
         var entries = folders.Distinct(StringComparer.OrdinalIgnoreCase)
             .Select(folder => $"FOLDER|{CreateDriverManifest(folder)}")
             .Concat(files.Distinct(StringComparer.OrdinalIgnoreCase).Select(file =>
             {
+                _cancellationToken.ThrowIfCancellationRequested();
                 var parent = Path.GetDirectoryName(file) ?? throw new InvalidOperationException($"The selected INF path is invalid: {file}");
                 var siblingEntries = Directory.EnumerateFiles(parent, "*", SearchOption.TopDirectoryOnly)
                     .Select(path =>
@@ -1250,22 +1307,90 @@ public sealed class WindowsMediaPreparer
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", entries))));
     }
 
-    private static async Task CopyDirectoryAsync(string source, string destination)
+    private async Task CopyDirectoryAsync(string source, string destination)
     {
-        await Task.Run(() =>
+        var pending = new Stack<(string Source, string Destination)>();
+        pending.Push((source, destination));
+        while (pending.Count > 0)
         {
-            var pending = new Stack<(string Source, string Destination)>();
-            pending.Push((source, destination));
-            while (pending.Count > 0)
+            _cancellationToken.ThrowIfCancellationRequested();
+            var current = pending.Pop();
+            Directory.CreateDirectory(current.Destination);
+            foreach (var file in Directory.EnumerateFiles(current.Source))
             {
-                var current = pending.Pop();
-                Directory.CreateDirectory(current.Destination);
-                foreach (var file in Directory.EnumerateFiles(current.Source))
-                    File.Copy(file, Path.Combine(current.Destination, Path.GetFileName(file)), true);
-                foreach (var folder in Directory.EnumerateDirectories(current.Source))
-                    pending.Push((folder, Path.Combine(current.Destination, Path.GetFileName(folder))));
+                _cancellationToken.ThrowIfCancellationRequested();
+                await CopyFileCancellableAsync(file, Path.Combine(current.Destination, Path.GetFileName(file)));
             }
-        });
+            foreach (var folder in Directory.EnumerateDirectories(current.Source))
+                pending.Push((folder, Path.Combine(current.Destination, Path.GetFileName(folder))));
+        }
+    }
+
+    private void WriteEditionConfiguration(string mediaRoot, WindowsIsoSelection selection)
+    {
+        var editionId = string.IsNullOrWhiteSpace(selection.EditionId)
+            ? InferEditionId(selection.EditionName)
+            : selection.EditionId.Trim();
+        if (string.IsNullOrWhiteSpace(editionId))
+            throw new InvalidOperationException($"Windows Setup did not report an edition ID for '{selection.EditionName}', so the app cannot suppress the product-key prompt safely.");
+
+        var sources = Path.Combine(mediaRoot, "sources");
+        Directory.CreateDirectory(sources);
+        var path = Path.Combine(sources, "ei.cfg");
+        MakeWritable(path);
+        File.WriteAllText(path,
+            $"[EditionID]{Environment.NewLine}{editionId}{Environment.NewLine}[Channel]{Environment.NewLine}Retail{Environment.NewLine}[VL]{Environment.NewLine}0{Environment.NewLine}",
+            new UTF8Encoding(false));
+        _log($"Windows Setup edition configuration written: EditionID={editionId}, Channel=Retail, VL=0. No product key was embedded.");
+    }
+
+    private static string InferEditionId(string editionName)
+    {
+        var name = editionName.Trim();
+        var normalized = Regex.Replace(name, @"^Windows\s+(?:10|11)\s+", "", RegexOptions.IgnoreCase).Trim();
+        return normalized.ToUpperInvariant() switch
+        {
+            "HOME" => "Core",
+            "HOME N" => "CoreN",
+            "HOME SINGLE LANGUAGE" => "CoreSingleLanguage",
+            "PRO" => "Professional",
+            "PRO N" => "ProfessionalN",
+            "PRO EDUCATION" => "ProfessionalEducation",
+            "PRO EDUCATION N" => "ProfessionalEducationN",
+            "PRO FOR WORKSTATIONS" => "ProfessionalWorkstation",
+            "PRO N FOR WORKSTATIONS" => "ProfessionalWorkstationN",
+            "EDUCATION" => "Education",
+            "EDUCATION N" => "EducationN",
+            "ENTERPRISE" => "Enterprise",
+            "ENTERPRISE N" => "EnterpriseN",
+            _ => ""
+        };
+    }
+
+    private async Task CopyFileCancellableAsync(string source, string destination)
+    {
+        const int bufferSize = 1024 * 1024;
+        await using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using var output = new FileStream(destination, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await input.CopyToAsync(output, bufferSize, _cancellationToken);
+    }
+
+    private void CopyFileCancellable(string source, string destination)
+    {
+        const int bufferSize = 1024 * 1024;
+        using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize,
+            FileOptions.SequentialScan);
+        using var output = new FileStream(destination, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize,
+            FileOptions.SequentialScan);
+        var buffer = new byte[bufferSize];
+        int read;
+        while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+        {
+            _cancellationToken.ThrowIfCancellationRequested();
+            output.Write(buffer, 0, read);
+        }
     }
 
     private async Task DiscardOwnMountsAsync(string stagingRoot)
@@ -1273,7 +1398,11 @@ public sealed class WindowsMediaPreparer
         if (!Directory.Exists(stagingRoot)) return;
         foreach (var mount in Directory.EnumerateDirectories(stagingRoot, "mount-*", SearchOption.TopDirectoryOnly))
         {
-            try { await RunDismAsync($"/Unmount-Image /MountDir:\"{mount}\" /Discard"); }
+            try
+            {
+                await RunDismAsync($"/Unmount-Image /MountDir:\"{mount}\" /Discard",
+                    operationName: "Discarding cancelled Windows image", cancellationToken: CancellationToken.None);
+            }
             catch { }
         }
     }
@@ -1283,7 +1412,7 @@ public sealed class WindowsMediaPreparer
         File.Exists(Path.Combine(root, "sources", "boot.wim")) && File.Exists(Path.Combine(root, "sources", "install.wim")) &&
         File.Exists(Path.Combine(root, "boot", "bcd")) && File.Exists(Path.Combine(root, "efi", "microsoft", "boot", "bcd"));
 
-    private static void EnsureStagingSpace(string stagingRoot, BootableIsoInfo info, WindowsIsoSelection selection)
+    private void EnsureStagingSpace(string stagingRoot, BootableIsoInfo info, WindowsIsoSelection selection)
     {
         var root = Path.GetPathRoot(Path.GetFullPath(stagingRoot))!;
         var available = new DriveInfo(root).AvailableFreeSpace;
@@ -1312,11 +1441,12 @@ public sealed class WindowsMediaPreparer
         File.SetAttributes(path, File.GetAttributes(path) & ~FileAttributes.ReadOnly);
     }
 
-    private static long CalculateDirectoryBytes(string root)
+    private long CalculateDirectoryBytes(string root)
     {
         long total = 0;
         foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
         {
+            _cancellationToken.ThrowIfCancellationRequested();
             var length = new FileInfo(file).Length;
             total = total > long.MaxValue - length ? long.MaxValue : total + length;
         }

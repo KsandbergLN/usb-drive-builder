@@ -64,7 +64,7 @@ public partial class MainWindow : Window
     private double _sharedPreparationStageStart;
     private double _sharedPreparationStageEnd;
     private double _queuePreparationShare;
-    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.92"}";
+    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.100"}";
     private const string MainPartitionDragFormat = "LaptopQaUsbBuilder.MainPartition";
     private const string ScriptRunnerName = "LaptopQA-RunScripts.cmd";
     private const string ScriptCleanupName = "LaptopQA-Cleanup.ps1";
@@ -75,6 +75,10 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        BorderlessWindowResizer.Attach(this);
+        var workArea = SystemParameters.WorkArea;
+        Width = Math.Min(1180, Math.Max(MinWidth, workArea.Width - 32));
+        Height = Math.Min(700, Math.Max(MinHeight, workArea.Height - 32));
         _preferences = LoadPreferences();
         Localization.ApplyCulture(_preferences.Language);
         _defaultPartitions = LoadPartitionConfig();
@@ -83,7 +87,11 @@ public partial class MainWindow : Window
         ApplyPartitionConfig();
         ApplyLanguage();
         ThemeService.Apply(this, _preferences.Theme);
-        Loaded += (_, _) => ThemeService.Apply(this, _preferences.Theme);
+        StateChanged += (_, _) => UpdateWindowStateVisuals();
+        Loaded += (_, _) =>
+        {
+            ThemeService.Apply(this, _preferences.Theme);
+        };
         Loaded += async (_, _) =>
         {
             AddActivity("USB Drive Builder started in administrator mode.");
@@ -94,6 +102,8 @@ public partial class MainWindow : Window
             if (!_isBuilding && !_isPreflighting)
             {
                 CleanupTemporaryCaches(_preservePreparedMediaForRetry);
+                if (BuildCacheCleanup.IsCleanupRequested)
+                    BuildCacheCleanup.StartCleanupAfterExit(Environment.ProcessId);
                 return;
             }
             e.Cancel = true;
@@ -126,22 +136,12 @@ public partial class MainWindow : Window
             return;
         }
 
-        var cacheRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LaptopQAUsbBuilder");
         try
         {
-            var cacheNames = preservePreparedMediaForRetry
-                ? Array.Empty<string>()
-                : ["MediaCache", "DriverPackCache", "DriverPayloadCache"];
-            foreach (var name in cacheNames)
-            {
-                var path = Path.Combine(cacheRoot, name);
-                for (var attempt = 0; attempt < 3 && Directory.Exists(path); attempt++)
-                {
-                    try { Directory.Delete(path, true); }
-                    catch (IOException) { Thread.Sleep(150); }
-                    catch (UnauthorizedAccessException) { Thread.Sleep(150); }
-                }
-            }
+            BuildCacheCleanup.ClearStagingBestEffort();
+            if (BuildCacheCleanup.IsCleanupRequested || !preservePreparedMediaForRetry)
+                BuildCacheCleanup.ClearBestEffort();
+            BuildCacheCleanup.CompleteRequestIfEmpty();
         }
         finally
         {
@@ -212,14 +212,17 @@ public partial class MainWindow : Window
         Directory.CreateDirectory(logFolder);
         _logPath = Path.Combine(logFolder, $"Build-{DateTime.Now:yyyyMMdd-HHmmss}.log");
         ActivityList.Items.Clear();
+        _buildCancellation = new CancellationTokenSource();
         SetPreflightState(true);
         await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.Render);
-        _buildCancellation = new CancellationTokenSource();
+        var cancelled = false;
+        var cancellationCleanupComplete = true;
         try { await BuildCoreAsync(); }
         catch (OperationCanceledException)
         {
+            cancelled = true;
             AddActivity("Build cancelled by user.");
-            SetStatus("✕ Cancelled", "#AE3338");
+            cancellationCleanupComplete = await Task.Run(BuildCacheCleanup.ClearStagingBestEffort);
         }
         catch (Exception ex)
         {
@@ -237,10 +240,19 @@ public partial class MainWindow : Window
             SetBuildingState(false);
             ReleaseCacheCleanupGuard();
         }
+        if (cancelled)
+        {
+            SetNonTransferActivity(cancellationCleanupComplete
+                ? "Cancelled — temporary staging cleaned up"
+                : "Cancelled — locked staging will be retried on close");
+            SetStatus("✕ Cancelled", "#AE3338");
+        }
     }
 
     private async Task BuildCoreAsync()
     {
+        var cancellationToken = _buildCancellation?.Token ?? CancellationToken.None;
+        cancellationToken.ThrowIfCancellationRequested();
         var queuedDisks = SelectedDisks();
         if (queuedDisks.Count == 0) return;
         InitializeQueueDriveProgress(queuedDisks);
@@ -288,6 +300,7 @@ public partial class MainWindow : Window
             .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         foreach (var source in folderSources)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (!Directory.Exists(source))
             {
                 MessageBox.Show($"Source folder not found:\n{source}", "Missing source", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -295,6 +308,7 @@ public partial class MainWindow : Window
             }
             foreach (var disk in queuedDisks)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (await SourceIsOnDiskAsync(source, disk.Number))
                 {
                     MessageBox.Show($"A copy source is stored on queued Disk {disk.Number} and would be erased before it could be copied:\n{source}",
@@ -305,23 +319,28 @@ public partial class MainWindow : Window
         }
         foreach (var source in fileSources)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (!File.Exists(source))
             {
                 MessageBox.Show($"Source file not found:\n{source}", "Missing source", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
             foreach (var disk in queuedDisks)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (await SourceIsOnDiskAsync(source, disk.Number))
                 {
                     MessageBox.Show($"A copy source is stored on queued Disk {disk.Number} and would be erased before it could be copied:\n{source}",
                         "Source is on target disk", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
+            }
         }
         SetSharedPreparationProgress(7);
 
         foreach (var partition in _partitions.Where(item => item.HasScripts || item.GenerateAutounattend))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 var answerFileSource = partition.GenerateAutounattend ? null : partition.AutounattendSource ?? partition.FolderXmlSource;
@@ -343,11 +362,13 @@ public partial class MainWindow : Window
         }
         SetSharedPreparationProgress(9);
 
-        await RefreshAllPartitionContentSizesAsync();
+        await RefreshAllPartitionContentSizesAsync(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
         SetSharedPreparationProgress(11);
 
         foreach (var partition in _partitions.Where(p => p.HasIso))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (partition.FileSystem != "NTFS" || partition.IsRemaining || !PartitionConfig.TryParseSize(partition.SizeText, out var partitionBytes))
             {
                 MessageBox.Show($"{partition.Name} must be a fixed-size NTFS partition to create bootable Windows media.",
@@ -381,7 +402,7 @@ public partial class MainWindow : Window
 
                 partition.IsoEditionName = edition.Name;
                 partition.ForceUnsignedDrivers = partition.HasDrivers && _preferences.ForceUnsignedDrivers;
-                var selection = new WindowsIsoSelection(edition.Index, edition.Name,
+                var selection = new WindowsIsoSelection(edition.Index, edition.Name, edition.EditionId,
                     partition.DriverFolders.ToArray(), partition.DriverFiles.ToArray(), partition.DriverArchives.ToArray(),
                     partition.ForceUnsignedDrivers);
                 var preparer = new WindowsMediaPreparer(
@@ -393,7 +414,8 @@ public partial class MainWindow : Window
                         AddActivity($"WARNING: {warning}");
                         Log($"DISM activity warning: {warning}");
                     },
-                    Log, MountIsoAsync, DismountIsoAsync);
+                    Log, MountIsoAsync, DismountIsoAsync,
+                    _buildCancellation?.Token ?? CancellationToken.None);
                 var prepared = await preparer.PrepareAsync(partition.IsoSource!, isoInfo, selection);
                 partition.PreparedMediaPath = prepared.MediaPath;
                 partition.ExtractedIsoBytes = prepared.TotalBytes;
@@ -408,6 +430,7 @@ public partial class MainWindow : Window
                 if (requiredCapacity > partitionBytes)
                     throw new InvalidOperationException($"The prepared Windows media and other selected content need approximately {FormatBytes(requiredCapacity)}, but {partition.Name} is only {FormatBytes(partitionBytes)}.");
             }
+            catch (OperationCanceledException) { throw; }
             catch (IncompleteDriverPackageException ex)
             {
                 SetStatus(Localization.Text(_preferences.Language, "Ready"), "#147A4B");
@@ -448,6 +471,7 @@ public partial class MainWindow : Window
         var failures = new List<string>();
         for (var queueIndex = 0; queueIndex < queuedDisks.Count; queueIndex++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var disk = queuedDisks[queueIndex];
             StartQueueDiskEstimate();
             SetActiveQueueDrive(queueIndex);
@@ -494,6 +518,7 @@ public partial class MainWindow : Window
                 AddActivity($"Disk {disk.Number} completed and verified.");
                 Log($"Disk {disk.Number} completed and verified.");
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 FailQueueDrive(queueIndex);
@@ -951,27 +976,44 @@ public partial class MainWindow : Window
 
     private static string BuildScriptRunner(IEnumerable<string> scriptPaths)
     {
-        var lines = new List<string> { "@echo off", "setlocal EnableExtensions DisableDelayedExpansion" };
-        foreach (var path in scriptPaths)
+        var paths = scriptPaths.ToArray();
+        var lines = new List<string>
+        {
+            "@echo off",
+            "setlocal EnableExtensions DisableDelayedExpansion",
+            "for %%I in (\"%~dp0.\") do set \"LaptopQaOriginal=%%~fI\"",
+            "set \"LaptopQaWork=%ProgramData%\\USBDriveBuilder\\ScriptRun\"",
+            "if exist \"%LaptopQaWork%\" rmdir /s /q \"%LaptopQaWork%\"",
+            "md \"%LaptopQaWork%\" 2>nul"
+        };
+        foreach (var path in paths)
+        {
+            var name = EscapeBatchLiteral(Path.GetFileName(path));
+            lines.Add($"copy /y \"%~dp0{name}\" \"%LaptopQaWork%\\{name}\" >nul");
+        }
+        lines.Add($"copy /y \"%~dp0{ScriptCleanupName}\" \"%LaptopQaWork%\\{ScriptCleanupName}\" >nul");
+        lines.Add("pushd \"%LaptopQaWork%\"");
+        foreach (var path in paths)
         {
             var name = EscapeBatchLiteral(Path.GetFileName(path));
             switch (Path.GetExtension(path).ToLowerInvariant())
             {
                 case ".cmd":
                 case ".bat":
-                    lines.Add($"call \"%~dp0{name}\"");
+                    lines.Add($"call \"%LaptopQaWork%\\{name}\"");
                     break;
                 case ".ps1":
-                    lines.Add($"\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0{name}\"");
+                    lines.Add($"\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%LaptopQaWork%\\{name}\"");
                     break;
                 case ".vbs":
                 case ".js":
                 case ".wsf":
-                    lines.Add($"\"%SystemRoot%\\System32\\cscript.exe\" //B //NoLogo \"%~dp0{name}\"");
+                    lines.Add($"\"%SystemRoot%\\System32\\cscript.exe\" //B //NoLogo \"%LaptopQaWork%\\{name}\"");
                     break;
             }
         }
-        lines.Add($"start \"\" /b \"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0{ScriptCleanupName}\"");
+        lines.Add("popd");
+        lines.Add($"start \"\" /b \"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%LaptopQaWork%\\{ScriptCleanupName}\" -OriginalRoot \"%LaptopQaOriginal%\" -WorkingRoot \"%LaptopQaWork%\"");
         lines.Add("endlocal");
         lines.Add("exit /b 0");
         return string.Join("\r\n", lines) + "\r\n";
@@ -985,14 +1027,14 @@ public partial class MainWindow : Window
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Select(name => $"'{name!.Replace("'", "''")}'");
         return string.Join(Environment.NewLine,
+            "param([string]$OriginalRoot, [string]$WorkingRoot)",
             "$ErrorActionPreference = 'SilentlyContinue'",
             "Start-Sleep -Seconds 2",
-            "$scriptRoot = Split-Path -LiteralPath $PSCommandPath -Parent",
             $"$removeNames = @({string.Join(", ", names)})",
-            "foreach ($name in $removeNames) { Remove-Item -LiteralPath (Join-Path $scriptRoot $name) -Force }",
-            "$cleanupPath = $PSCommandPath",
-            "Remove-Item -LiteralPath $cleanupPath -Force",
-            "if (-not (Get-ChildItem -LiteralPath $scriptRoot -Force | Select-Object -First 1)) { Remove-Item -LiteralPath $scriptRoot -Force }") + Environment.NewLine;
+            "foreach ($name in $removeNames) { Remove-Item -LiteralPath (Join-Path $OriginalRoot $name) -Force }",
+            "Remove-Item -LiteralPath (Join-Path $OriginalRoot 'LaptopQA-Cleanup.ps1') -Force",
+            "if (-not (Get-ChildItem -LiteralPath $OriginalRoot -Force | Select-Object -First 1)) { Remove-Item -LiteralPath $OriginalRoot -Force }",
+            "Remove-Item -LiteralPath $WorkingRoot -Recurse -Force") + Environment.NewLine;
     }
 
     private static string EscapeBatchLiteral(string value) => value.Replace("%", "%%");
@@ -1047,7 +1089,7 @@ public partial class MainWindow : Window
         var logFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LaptopQAUsbBuilder", "Logs");
         Directory.CreateDirectory(logFolder);
         var dismLog = Path.Combine(logFolder, "DISM-inspect.log");
-        var script = $"@(Get-WindowsImage -ImagePath '{PsQuote(imagePath)}' -LogPath '{PsQuote(dismLog)}' -ErrorAction Stop|ForEach-Object{{[pscustomobject]@{{Index=$_.ImageIndex;Name=$_.ImageName;Description=$_.ImageDescription;Size=[long]$_.ImageSize}}}})|ConvertTo-Json -Compress";
+        var script = $"@(Get-WindowsImage -ImagePath '{PsQuote(imagePath)}' -LogPath '{PsQuote(dismLog)}' -ErrorAction Stop|ForEach-Object{{[pscustomobject]@{{Index=$_.ImageIndex;Name=$_.ImageName;Description=$_.ImageDescription;Size=[long]$_.ImageSize;EditionId=$_.EditionId}}}})|ConvertTo-Json -Compress";
         var json = await RunPowerShellAsync(script);
         if (string.IsNullOrWhiteSpace(json)) return [];
         using var document = JsonDocument.Parse(json);
@@ -1063,7 +1105,13 @@ public partial class MainWindow : Window
     {
         var escapedPath = PsQuote(isoPath);
         var mountScript = $"$path='{escapedPath}';$existing=Get-DiskImage -ImagePath $path -ErrorAction SilentlyContinue;if($existing -and $existing.Attached){{throw 'The selected ISO is already mounted. Dismount it in Windows before building.'}};try{{Mount-DiskImage -ImagePath $path -PassThru -ErrorAction Stop|Out-Null;$v=$null;for($i=0;$i -lt 20 -and -not $v;$i++){{Start-Sleep -Milliseconds 250;$v=Get-DiskImage -ImagePath $path|Get-Volume -ErrorAction SilentlyContinue|Where-Object DriveLetter|Select-Object -First 1}};if(-not $v){{throw 'Windows mounted the ISO but did not assign it a drive letter.'}};$v.DriveLetter}}catch{{Dismount-DiskImage -ImagePath $path -ErrorAction SilentlyContinue;throw}}";
-        var driveLetter = (await RunPowerShellAsync(mountScript)).Trim().TrimEnd(':');
+        string driveLetter;
+        try { driveLetter = (await RunPowerShellAsync(mountScript)).Trim().TrimEnd(':'); }
+        catch
+        {
+            try { await DismountIsoAsync(isoPath); } catch { }
+            throw;
+        }
         if (driveLetter.Length != 1 || !char.IsLetter(driveLetter[0]))
         {
             await DismountIsoAsync(isoPath);
@@ -1073,7 +1121,7 @@ public partial class MainWindow : Window
     }
 
     private Task DismountIsoAsync(string isoPath) =>
-        RunPowerShellAsync($"Dismount-DiskImage -ImagePath '{PsQuote(isoPath)}' -ErrorAction Stop");
+        RunPowerShellAsync($"Dismount-DiskImage -ImagePath '{PsQuote(isoPath)}' -ErrorAction Stop", CancellationToken.None);
 
     private async Task CopySourceAsync(string source, string destination, string name, int startProgress, int endProgress, string? excludedFile = null)
     {
@@ -1081,7 +1129,8 @@ public partial class MainWindow : Window
         AddActivity($"Copying {name} content from {source}.");
         Log($"Copying {source} to {destination}");
         CurrentEtaText.Text = $"Current activity: Scanning {name}...";
-        var totalBytes = await Task.Run(() => CalculateDirectoryBytes(source, excludedFile));
+        var cancellationToken = _buildCancellation?.Token ?? CancellationToken.None;
+        var totalBytes = await Task.Run(() => CalculateDirectoryBytes(source, excludedFile, cancellationToken), cancellationToken);
         BeginTransferActivity(name, totalBytes, startProgress, endProgress);
         try
         {
@@ -1091,6 +1140,7 @@ public partial class MainWindow : Window
                 directories.Push((source, destination));
                 while (directories.Count > 0)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var current = directories.Pop();
                     Directory.CreateDirectory(current.Target);
                     string[] files;
@@ -1113,6 +1163,7 @@ public partial class MainWindow : Window
 
                     foreach (var file in files)
                     {
+                        cancellationToken.ThrowIfCancellationRequested();
                         if (excludedFile is not null && file.Equals(excludedFile, StringComparison.OrdinalIgnoreCase)) continue;
                         CopyFileWithProgress(file, Path.Combine(current.Target, Path.GetFileName(file)));
                     }
@@ -1143,7 +1194,7 @@ public partial class MainWindow : Window
                         directories.Push((folder, Path.Combine(current.Target, Path.GetFileName(folder))));
                     }
                 }
-            });
+            }, cancellationToken);
             BuildProgress.Value = endProgress;
         }
         finally
@@ -1171,6 +1222,7 @@ public partial class MainWindow : Window
     private void CopyFileWithProgress(string source, string destination)
     {
         const int bufferSize = 256 * 1024;
+        try
         {
             using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize, FileOptions.SequentialScan);
             using var output = new FileStream(destination, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize, FileOptions.SequentialScan);
@@ -1180,6 +1232,7 @@ public partial class MainWindow : Window
                 int bytesRead;
                 while ((bytesRead = input.Read(buffer, 0, buffer.Length)) > 0)
                 {
+                    _buildCancellation?.Token.ThrowIfCancellationRequested();
                     output.Write(buffer, 0, bytesRead);
                     ReportTransferBytes(bytesRead);
                 }
@@ -1189,15 +1242,22 @@ public partial class MainWindow : Window
                 ArrayPool<byte>.Shared.Return(buffer);
             }
         }
+        catch (OperationCanceledException)
+        {
+            try { File.Delete(destination); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            throw;
+        }
         try { File.SetLastWriteTimeUtc(destination, File.GetLastWriteTimeUtc(source)); }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
     }
 
-    private static long CalculateDirectoryBytes(string source, string? excludedFile = null)
-        => CalculateDirectoryStats(source, excludedFile).TotalBytes;
+    private static long CalculateDirectoryBytes(string source, string? excludedFile = null,
+        CancellationToken cancellationToken = default)
+        => CalculateDirectoryStats(source, excludedFile, cancellationToken).TotalBytes;
 
-    private static (long TotalBytes, long LargestFileBytes) CalculateDirectoryStats(string source, string? excludedFile = null)
+    private static (long TotalBytes, long LargestFileBytes) CalculateDirectoryStats(string source, string? excludedFile = null,
+        CancellationToken cancellationToken = default)
     {
         long total = 0;
         long largest = 0;
@@ -1205,11 +1265,13 @@ public partial class MainWindow : Window
         directories.Push(source);
         while (directories.Count > 0)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var current = directories.Pop();
             try
             {
                 foreach (var file in Directory.EnumerateFiles(current))
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     if (excludedFile is not null && file.Equals(excludedFile, StringComparison.OrdinalIgnoreCase)) continue;
                     var length = GetFileLength(file);
                     total = SaturatingAdd(total, length);
@@ -1234,13 +1296,15 @@ public partial class MainWindow : Window
         return (total, largest);
     }
 
-    private static (long TotalBytes, long LargestFileBytes) CalculateSelectedContentStats(PartitionConfig partition)
+    private static (long TotalBytes, long LargestFileBytes) CalculateSelectedContentStats(PartitionConfig partition,
+        CancellationToken cancellationToken = default)
     {
         long total = 0;
         long largest = 0;
         foreach (var folder in partition.SourceFolders.Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            var stats = CalculateDirectoryStats(folder);
+            cancellationToken.ThrowIfCancellationRequested();
+            var stats = CalculateDirectoryStats(folder, cancellationToken: cancellationToken);
             total = SaturatingAdd(total, stats.TotalBytes);
             largest = Math.Max(largest, stats.LargestFileBytes);
         }
@@ -1252,6 +1316,7 @@ public partial class MainWindow : Window
             .Distinct(StringComparer.OrdinalIgnoreCase);
         foreach (var file in files)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var length = GetFileLength(file);
             total = SaturatingAdd(total, length);
             largest = Math.Max(largest, length);
@@ -1279,10 +1344,10 @@ public partial class MainWindow : Window
                 "Partition content will not fit", MessageBoxButton.OK, MessageBoxImage.Warning);
     }
 
-    private async Task RefreshAllPartitionContentSizesAsync()
+    private async Task RefreshAllPartitionContentSizesAsync(CancellationToken cancellationToken = default)
     {
         var stats = await Task.WhenAll(_partitions.Select(partition =>
-            Task.Run(() => CalculateSelectedContentStats(partition))));
+            Task.Run(() => CalculateSelectedContentStats(partition, cancellationToken), cancellationToken)));
         for (var index = 0; index < _partitions.Count; index++)
         {
             _partitions[index].SelectedContentBytes = stats[index].TotalBytes;
@@ -1608,10 +1673,20 @@ public partial class MainWindow : Window
     private static Brush CreateStripedDriveBrush(Color green)
     {
         var dark = Darken(green, 0.58);
-        return new LinearGradientBrush(
+        var brush = new LinearGradientBrush(
             [new GradientStop(green, 0), new GradientStop(green, 0.48), new GradientStop(dark, 0.49),
              new GradientStop(dark, 0.72), new GradientStop(green, 0.73), new GradientStop(green, 1)],
             new Point(0, 0), new Point(0.12, 0.12)) { SpreadMethod = GradientSpreadMethod.Repeat };
+        var movement = new TranslateTransform();
+        brush.RelativeTransform = movement;
+        movement.BeginAnimation(TranslateTransform.XProperty, new System.Windows.Media.Animation.DoubleAnimation
+        {
+            From = 0,
+            To = 0.12,
+            Duration = TimeSpan.FromMilliseconds(850),
+            RepeatBehavior = System.Windows.Media.Animation.RepeatBehavior.Forever
+        });
+        return brush;
     }
 
     private void BeginTransferActivity(string name, long totalBytes, double startProgress, double endProgress)
@@ -1762,7 +1837,7 @@ public partial class MainWindow : Window
         return int.TryParse(result.Trim(), out var sourceDisk) && sourceDisk == diskNumber;
     }
 
-    private async Task<string> RunPowerShellAsync(string script)
+    private async Task<string> RunPowerShellAsync(string script, CancellationToken? cancellationToken = null)
     {
         var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
         var start = new ProcessStartInfo
@@ -1780,7 +1855,8 @@ public partial class MainWindow : Window
         using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start the Windows storage service.");
         var outputTask = process.StandardOutput.ReadToEndAsync();
         var errorTask = process.StandardError.ReadToEndAsync();
-        try { await process.WaitForExitAsync(_buildCancellation?.Token ?? CancellationToken.None); }
+        var effectiveCancellation = cancellationToken ?? _buildCancellation?.Token ?? CancellationToken.None;
+        try { await process.WaitForExitAsync(effectiveCancellation); }
         catch (OperationCanceledException) { try { if (!process.HasExited) process.Kill(true); } catch { } throw; }
         var output = (await outputTask).Trim();
         var error = (await errorTask).Trim();
@@ -1833,8 +1909,9 @@ public partial class MainWindow : Window
         DiskPicker.IsEnabled = !building; RefreshButton.IsEnabled = !building;
         MainPartitionList.IsEnabled = !building; AddPartitionButton.IsEnabled = !building; MainDefaultsButton.IsEnabled = !building;
         ConfirmText.IsEnabled = !building;
-        CancelBuildButton.Visibility = building ? Visibility.Visible : Visibility.Collapsed;
-        CancelBuildButton.IsEnabled = building;
+        var canCancel = building || _isPreflighting;
+        CancelBuildButton.Visibility = canCancel ? Visibility.Visible : Visibility.Collapsed;
+        CancelBuildButton.IsEnabled = canCancel && !(_buildCancellation?.IsCancellationRequested ?? false);
         UpdateBuildButton();
     }
 
@@ -1860,6 +1937,9 @@ public partial class MainWindow : Window
         MainDefaultsButton.IsEnabled = interactive;
         ConfirmText.IsEnabled = interactive;
         Cursor = preflighting ? Cursors.Wait : null;
+        var canCancel = preflighting || _isBuilding;
+        CancelBuildButton.Visibility = canCancel ? Visibility.Visible : Visibility.Collapsed;
+        CancelBuildButton.IsEnabled = canCancel && !(_buildCancellation?.IsCancellationRequested ?? false);
         if (preflighting)
         {
             SetStatus("Preparing build", "#B36A13");
@@ -2369,6 +2449,17 @@ public partial class MainWindow : Window
         catch (InvalidOperationException) { }
     }
     private void Minimize_Click(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
+    private void MaximizeRestore_Click(object sender, RoutedEventArgs e) =>
+        WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+
+    private void UpdateWindowStateVisuals()
+    {
+        if (MaximizeRestoreButton is null || MainShell is null) return;
+        var maximized = WindowState == WindowState.Maximized;
+        MaximizeRestoreButton.Content = maximized ? "\uE923" : "\uE922";
+        MaximizeRestoreButton.ToolTip = maximized ? "Restore" : "Maximize";
+        MainShell.CornerRadius = maximized ? new CornerRadius(0) : new CornerRadius(28);
+    }
     private void Close_Click(object sender, RoutedEventArgs e) { if (!_isBuilding) Close(); }
     private async void Refresh_Click(object sender, RoutedEventArgs e) => await RefreshDisksAsync();
     private void ConfirmText_TextChanged(object sender, TextChangedEventArgs e) => UpdateBuildButton();
