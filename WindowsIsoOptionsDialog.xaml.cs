@@ -49,7 +49,7 @@ public partial class WindowsIsoOptionsDialog : Window
     private void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e) { if (e.ButtonState == MouseButtonState.Pressed) DragMove(); }
 }
 
-public sealed record WindowsImageEdition(int Index, string Name, string Description, long Size)
+public sealed record WindowsImageEdition(int Index, string Name, string Description, long Size, string EditionId = "")
 {
     public string DisplayName => $"{Name}  (index {Index})";
 }
@@ -59,6 +59,7 @@ public sealed record WindowsIsoEditionSelection(int EditionIndex, string Edition
 public sealed record WindowsIsoSelection(
     int EditionIndex,
     string EditionName,
+    string EditionId,
     IReadOnlyList<string> DriverFolders,
     IReadOnlyList<string> DriverFiles,
     IReadOnlyList<string> DriverArchives,

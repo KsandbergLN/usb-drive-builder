@@ -16,7 +16,6 @@ namespace LaptopQaUsbBuilder;
 
 public partial class ConfigWindow : Window, INotifyPropertyChanged
 {
-    private static readonly string[] CacheDirectoryNames = ["MediaCache", "DriverPackCache", "DriverPayloadCache"];
     private static readonly IReadOnlyList<OobeLanguageOption> OobeLanguages =
     [
         new("en-US", "English (United States)"), new("es-ES", "Spanish (Spain)"), new("fr-FR", "French (France)"), new("de-DE", "German (Germany)"),
@@ -56,6 +55,10 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
     public ConfigWindow(IEnumerable<PartitionConfig> current, string language, string theme, bool forceUnsignedDrivers, WindowsSetupConfig? windowsSetup = null)
     {
         InitializeComponent();
+        BorderlessWindowResizer.Attach(this);
+        var workArea = SystemParameters.WorkArea;
+        Width = Math.Min(820, Math.Max(MinWidth, workArea.Width - 64));
+        Height = Math.Min(660, Math.Max(MinHeight, workArea.Height - 64));
         SelectedLanguage = Localization.Resolve(language).Code;
         SelectedTheme = ThemeService.Normalize(theme);
         ForceUnsignedDrivers = forceUnsignedDrivers;
@@ -93,7 +96,7 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
     private async Task RefreshCacheSizeAsync()
     {
         CacheSizeText.Text = "Calculating cache size...";
-        var size = await Task.Run(GetCacheSize);
+        var size = await Task.Run(BuildCacheCleanup.GetSize);
         CacheSizeText.Text = size == 0
             ? "No cached Windows media or temporary driver data."
             : $"{FormatBytes(size)} cached locally. Logs and saved settings are not included.";
@@ -102,7 +105,7 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
 
     private async void ClearCache_Click(object sender, RoutedEventArgs e)
     {
-        var size = await Task.Run(GetCacheSize);
+        var size = await Task.Run(BuildCacheCleanup.GetSize);
         if (size == 0)
         {
             await RefreshCacheSizeAsync();
@@ -115,23 +118,24 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
 
         ClearCacheButton.IsEnabled = false;
         CacheSizeText.Text = "Clearing cache...";
+        BuildCacheCleanup.RequestCleanupOnExit();
         var result = await Task.Run(ClearCache);
         await RefreshCacheSizeAsync();
         if (!result.Acquired)
         {
             ThemedMessageDialog.Show(this,
-                "The cache is currently being used by another USB Drive Builder window. Close that build or wait for media preparation to finish, then try again.",
+                "Another USB Drive Builder window is currently using the cache. All remaining cache data is scheduled for deletion after USB Drive Builder closes.",
                 "Cache in use", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
         if (result.RemainingBytes > 0)
         {
             ThemedMessageDialog.Show(this,
-                $"Most cached data was removed, but {FormatBytes(result.RemainingBytes)} is still locked or in use. Close other programs that may be scanning those files and try again.",
+                $"Everything currently removable was deleted. {FormatBytes(result.RemainingBytes)} is still locked or in use and is scheduled for deletion after USB Drive Builder closes.",
                 "Cache partially cleared", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
-        ThemedMessageDialog.Show(this, "The build cache was cleared. Logs and saved settings were kept.",
+        ThemedMessageDialog.Show(this, "The build cache was cleared. A final cleanup will run after the app closes. Logs and saved settings are kept.",
             "Cache cleared", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
@@ -143,21 +147,12 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
         {
             guard = new Semaphore(1, 1, MainWindow.CacheCleanupGuardName);
             acquired = guard.WaitOne(0);
-            if (!acquired) return new CacheClearResult(false, GetCacheSize());
-            foreach (var path in GetCachePaths())
-            {
-                for (var attempt = 0; attempt < 3 && Directory.Exists(path); attempt++)
-                {
-                    try { Directory.Delete(path, true); }
-                    catch (IOException) { Thread.Sleep(150); }
-                    catch (UnauthorizedAccessException) { Thread.Sleep(150); }
-                }
-            }
-            return new CacheClearResult(true, GetCacheSize());
+            if (!acquired) return new CacheClearResult(false, BuildCacheCleanup.GetSize());
+            return new CacheClearResult(true, BuildCacheCleanup.ClearBestEffort());
         }
         catch (UnauthorizedAccessException)
         {
-            return new CacheClearResult(false, GetCacheSize());
+            return new CacheClearResult(false, BuildCacheCleanup.GetSize());
         }
         finally
         {
@@ -168,33 +163,6 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
             }
             guard?.Dispose();
         }
-    }
-
-    private static long GetCacheSize()
-    {
-        long total = 0;
-        foreach (var path in GetCachePaths())
-        {
-            if (!Directory.Exists(path)) continue;
-            try
-            {
-                foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
-                {
-                    try { total += new FileInfo(file).Length; }
-                    catch (IOException) { }
-                    catch (UnauthorizedAccessException) { }
-                }
-            }
-            catch (IOException) { }
-            catch (UnauthorizedAccessException) { }
-        }
-        return total;
-    }
-
-    private static IEnumerable<string> GetCachePaths()
-    {
-        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LaptopQAUsbBuilder");
-        return CacheDirectoryNames.Select(name => Path.Combine(root, name));
     }
 
     private static string FormatBytes(long bytes)

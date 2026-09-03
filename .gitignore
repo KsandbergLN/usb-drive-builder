@@ -5,3 +5,4 @@ obj/
 # Keep them locally and publish them as GitHub Release assets instead.
 dist/*.exe
 dist/*.dll
+dist/*.zip
