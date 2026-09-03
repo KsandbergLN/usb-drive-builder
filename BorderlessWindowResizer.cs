@@ -9,6 +9,7 @@ internal static class BorderlessWindowResizer
 {
     private const int WmNcHitTest = 0x0084;
     private const int WmSystemCommand = 0x0112;
+    private const int WmSizing = 0x0214;
     private const int ScSize = 0xF000;
     private const int GwlStyle = -16;
     private const long WsThickFrame = 0x00040000L;
@@ -22,8 +23,10 @@ internal static class BorderlessWindowResizer
     private const int HtBottomRight = 17;
     private const double GripDip = 14;
 
-    public static void Attach(Window window)
+    public static void Attach(Window window, double designWidth, double designHeight)
     {
+        if (designWidth <= 0 || designHeight <= 0) throw new ArgumentOutOfRangeException(nameof(designWidth));
+        var aspectRatio = designWidth / designHeight;
         HwndSource? source = null;
         HwndSourceHook? hook = null;
         window.ResizeMode = ResizeMode.CanResize;
@@ -60,13 +63,93 @@ internal static class BorderlessWindowResizer
             SetWindowLongPtr(hwnd, GwlStyle, new IntPtr(style | WsThickFrame));
             source = HwndSource.FromHwnd(hwnd);
             hook = (IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam, ref bool handled) =>
-                HitTest(window, hwnd, message, lParam, ref handled);
+                WindowMessage(window, aspectRatio, hwnd, message, wParam, lParam, ref handled);
             source?.AddHook(hook);
         };
         window.Closed += (_, _) =>
         {
             if (source is not null && hook is not null) source.RemoveHook(hook);
         };
+    }
+
+    private static IntPtr WindowMessage(Window window, double aspectRatio, IntPtr hwnd, int message,
+        IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (message == WmSizing && window.WindowState == WindowState.Normal && lParam != IntPtr.Zero)
+        {
+            ConstrainSizingRect(window, aspectRatio, hwnd, wParam.ToInt32(), lParam);
+            handled = true;
+            return new IntPtr(1);
+        }
+        return HitTest(window, hwnd, message, lParam, ref handled);
+    }
+
+    private static void ConstrainSizingRect(Window window, double aspectRatio, IntPtr hwnd, int edge, IntPtr rectPointer)
+    {
+        var rect = Marshal.PtrToStructure<NativeRect>(rectPointer);
+        var width = Math.Max(1, rect.Right - rect.Left);
+        var height = Math.Max(1, rect.Bottom - rect.Top);
+        var dpiScale = Math.Max(1d, GetDpiForWindow(hwnd) / 96d);
+        var minimumWidth = Math.Max(1, (int)Math.Ceiling(window.MinWidth * dpiScale));
+        var minimumHeight = Math.Max(1, (int)Math.Ceiling(window.MinHeight * dpiScale));
+
+        var widthDriven = edge is 1 or 2;
+        if (edge is 4 or 5 or 7 or 8)
+        {
+            var heightAdjustment = Math.Abs(height - width / aspectRatio);
+            var widthAdjustment = Math.Abs(width - height * aspectRatio);
+            widthDriven = heightAdjustment <= widthAdjustment;
+        }
+
+        int targetWidth;
+        int targetHeight;
+        if (widthDriven)
+        {
+            targetWidth = Math.Max(width, minimumWidth);
+            targetHeight = (int)Math.Round(targetWidth / aspectRatio);
+            if (targetHeight < minimumHeight)
+            {
+                targetHeight = minimumHeight;
+                targetWidth = (int)Math.Round(targetHeight * aspectRatio);
+            }
+        }
+        else
+        {
+            targetHeight = Math.Max(height, minimumHeight);
+            targetWidth = (int)Math.Round(targetHeight * aspectRatio);
+            if (targetWidth < minimumWidth)
+            {
+                targetWidth = minimumWidth;
+                targetHeight = (int)Math.Round(targetWidth / aspectRatio);
+            }
+        }
+
+        if (edge is 1 or 2)
+        {
+            var verticalCenter = (rect.Top + rect.Bottom) / 2;
+            if (edge == 1) rect.Left = rect.Right - targetWidth;
+            else rect.Right = rect.Left + targetWidth;
+            rect.Top = verticalCenter - targetHeight / 2;
+            rect.Bottom = rect.Top + targetHeight;
+        }
+        else if (edge is 3 or 6)
+        {
+            var horizontalCenter = (rect.Left + rect.Right) / 2;
+            if (edge == 3) rect.Top = rect.Bottom - targetHeight;
+            else rect.Bottom = rect.Top + targetHeight;
+            rect.Left = horizontalCenter - targetWidth / 2;
+            rect.Right = rect.Left + targetWidth;
+        }
+        else
+        {
+            var movingLeft = edge is 4 or 7;
+            var movingTop = edge is 4 or 5;
+            if (movingLeft) rect.Left = rect.Right - targetWidth;
+            else rect.Right = rect.Left + targetWidth;
+            if (movingTop) rect.Top = rect.Bottom - targetHeight;
+            else rect.Bottom = rect.Top + targetHeight;
+        }
+        Marshal.StructureToPtr(rect, rectPointer, false);
     }
 
     private static int GetWpfHit(Window window, Point point)

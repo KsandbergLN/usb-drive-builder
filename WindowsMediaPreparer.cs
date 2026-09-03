@@ -94,22 +94,50 @@ public sealed class WindowsMediaPreparer
 
             var sources = Path.Combine(mediaRoot, "sources");
             var sourceInstallImage = Path.Combine(sources, info.InstallImageName);
-            var selectedInstallImage = Path.Combine(sources, "install.selected.wim");
+            var workingInstallImage = Path.Combine(sources, "install.working.wim");
+            var compressionMode = WindowsImageCompression.Normalize(selection.CompressionMode);
+            var needsFinalExport = compressionMode == WindowsImageCompression.Esd ||
+                                   (compressionMode == WindowsImageCompression.Max && selection.AddDrivers);
+            var workingCompression = needsFinalExport ? "fast" : compressionMode.ToLowerInvariant();
             MakeWritable(sourceInstallImage);
-            _activity($"Exporting {selection.EditionName} with maximum WIM compression...");
-            await RunDismAsync($"/Export-Image /SourceImageFile:\"{sourceInstallImage}\" /SourceIndex:{selection.EditionIndex} /DestinationImageFile:\"{selectedInstallImage}\" /Compress:max",
-                operationName: $"Exporting {selection.EditionName}", activityPaths: [sourceInstallImage, selectedInstallImage]);
+            _activity($"Exporting {selection.EditionName} working WIM with {workingCompression} compression...");
+            await RunDismAsync($"/Export-Image /SourceImageFile:\"{sourceInstallImage}\" /SourceIndex:{selection.EditionIndex} /DestinationImageFile:\"{workingInstallImage}\" /Compress:{workingCompression}",
+                operationName: $"Exporting {selection.EditionName}", activityPaths: [sourceInstallImage, workingInstallImage]);
             File.Delete(sourceInstallImage);
-            var finalInstallImage = Path.Combine(sources, "install.wim");
-            if (!sourceInstallImage.Equals(finalInstallImage, StringComparison.OrdinalIgnoreCase) && File.Exists(finalInstallImage)) File.Delete(finalInstallImage);
-            File.Move(selectedInstallImage, finalInstallImage);
+            var finalWim = Path.Combine(sources, "install.wim");
+            var finalEsd = Path.Combine(sources, "install.esd");
+            if (File.Exists(finalWim)) File.Delete(finalWim);
+            if (File.Exists(finalEsd)) File.Delete(finalEsd);
             WriteEditionConfiguration(mediaRoot, selection);
 
             var driverRejections = new List<DriverInjectionRejection>();
             if (selection.AddDrivers)
             {
-                var rejected = await ServiceImageAsync(finalInstallImage, 1, selection, stagingRoot, selection.EditionName);
+                var rejected = await ServiceImageAsync(workingInstallImage, 1, selection, stagingRoot, selection.EditionName);
                 driverRejections.AddRange(rejected.Select(path => new DriverInjectionRejection($"Installed Windows ({selection.EditionName})", path)));
+            }
+
+            if (compressionMode == WindowsImageCompression.Esd)
+            {
+                var compactedEsd = Path.Combine(sources, "install.compacted.esd");
+                _activity($"Creating smallest ESD installer for {selection.EditionName}...");
+                await RunDismAsync($"/Export-Image /SourceImageFile:\"{workingInstallImage}\" /SourceIndex:1 /DestinationImageFile:\"{compactedEsd}\" /Compress:recovery /CheckIntegrity",
+                    operationName: $"Creating {selection.EditionName} ESD", activityPaths: [workingInstallImage, compactedEsd]);
+                File.Delete(workingInstallImage);
+                File.Move(compactedEsd, finalEsd);
+            }
+            else if (compressionMode == WindowsImageCompression.Max && selection.AddDrivers)
+            {
+                var compactedWim = Path.Combine(sources, "install.compacted.wim");
+                _activity($"Compacting serviced {selection.EditionName} WIM with maximum compression...");
+                await RunDismAsync($"/Export-Image /SourceImageFile:\"{workingInstallImage}\" /SourceIndex:1 /DestinationImageFile:\"{compactedWim}\" /Compress:max /CheckIntegrity",
+                    operationName: $"Compacting {selection.EditionName} WIM", activityPaths: [workingInstallImage, compactedWim]);
+                File.Delete(workingInstallImage);
+                File.Move(compactedWim, finalWim);
+            }
+            else
+            {
+                File.Move(workingInstallImage, finalWim);
             }
 
             if (!IsCompleteWindowsMedia(mediaRoot))
@@ -120,7 +148,7 @@ public sealed class WindowsMediaPreparer
             if (!await TryMoveCompletedCacheAsync(mediaRoot, cachedMedia, "Windows media"))
                 throw new IOException("Windows media preparation completed, but its cache directory remained locked after several retries.");
             File.WriteAllText(completeMarker,
-                $"Edition={selection.EditionName}{Environment.NewLine}Created={DateTimeOffset.Now:O}{Environment.NewLine}DriverFolders={selection.DriverFolders.Count}{Environment.NewLine}DriverFiles={selection.DriverFiles.Count}{Environment.NewLine}DriverPacks={selection.DriverArchives.Count}{Environment.NewLine}ForceUnsigned={selection.ForceUnsigned}");
+                $"Edition={selection.EditionName}{Environment.NewLine}Compression={compressionMode}{Environment.NewLine}Created={DateTimeOffset.Now:O}{Environment.NewLine}DriverFolders={selection.DriverFolders.Count}{Environment.NewLine}DriverFiles={selection.DriverFiles.Count}{Environment.NewLine}DriverPacks={selection.DriverArchives.Count}{Environment.NewLine}ForceUnsigned={selection.ForceUnsigned}");
             File.WriteAllText(rejectionReport, System.Text.Json.JsonSerializer.Serialize(driverRejections));
             var totalBytes = CalculateDirectoryBytes(cachedMedia);
             _activity($"Prepared {selection.EditionName} media cached for reuse.");
@@ -1257,8 +1285,8 @@ public sealed class WindowsMediaPreparer
         var driverManifest = selection.AddDrivers
             ? CreateDriverManifest(selection.DriverFolders, selection.DriverFiles)
             : "NO_DRIVERS";
-        var descriptor = string.Join("|", "CACHE_V10_DEDUPLICATED_DRIVER_STAGING", isoHash, selection.EditionIndex, selection.EditionName,
-            selection.AddDrivers, selection.ForceUnsigned, driverManifest);
+        var descriptor = string.Join("|", "CACHE_V11_COMPRESSION_MODES", isoHash, selection.EditionIndex, selection.EditionName,
+            selection.AddDrivers, selection.ForceUnsigned, WindowsImageCompression.Normalize(selection.CompressionMode), driverManifest);
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(descriptor))).ToLowerInvariant();
     }
 
@@ -1407,10 +1435,14 @@ public sealed class WindowsMediaPreparer
         }
     }
 
-    private static bool IsCompleteWindowsMedia(string root) =>
-        Directory.Exists(root) && File.Exists(Path.Combine(root, "efi", "boot", "bootx64.efi")) &&
-        File.Exists(Path.Combine(root, "sources", "boot.wim")) && File.Exists(Path.Combine(root, "sources", "install.wim")) &&
-        File.Exists(Path.Combine(root, "boot", "bcd")) && File.Exists(Path.Combine(root, "efi", "microsoft", "boot", "bcd"));
+    private static bool IsCompleteWindowsMedia(string root)
+    {
+        var sources = Path.Combine(root, "sources");
+        return Directory.Exists(root) && File.Exists(Path.Combine(root, "efi", "boot", "bootx64.efi")) &&
+               File.Exists(Path.Combine(sources, "boot.wim")) &&
+               (File.Exists(Path.Combine(sources, "install.wim")) || File.Exists(Path.Combine(sources, "install.esd"))) &&
+               File.Exists(Path.Combine(root, "boot", "bcd")) && File.Exists(Path.Combine(root, "efi", "microsoft", "boot", "bcd"));
+    }
 
     private void EnsureStagingSpace(string stagingRoot, BootableIsoInfo info, WindowsIsoSelection selection)
     {

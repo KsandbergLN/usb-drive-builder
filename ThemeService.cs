@@ -41,7 +41,7 @@ public static class ThemeService
             window.Resources["DriveSelectedBackground"] = Brush(name == "Light" ? "#D7F3E5" : name == "AMOLED" ? "#0B3B25" : "#176044");
             var driveSelectedBorder = Brush(name == "Light" ? "#20B86A" : name == "AMOLED" ? "#35E58A" : "#48D998");
             window.Resources["DriveSelectedBorder"] = driveSelectedBorder;
-            window.Resources["DriveActiveBackground"] = AnimatedStripedBrush(driveSelectedBorder.Color);
+            window.Resources["DriveActiveBackground"] = CreateAnimatedDiagonalStripeBrush(driveSelectedBorder.Color);
             window.Resources["DriveCompletedBackground"] = Brush(Darken(driveSelectedBorder.Color, 0.58));
             window.Resources["DriveProgressText"] = Brush("#F7FFFB");
             window.Resources["DriveFailedBackground"] = Brush(name == "AMOLED" ? "#9E3039" : name == "Dark" ? "#B94D56" : "#C75E63");
@@ -120,24 +120,31 @@ public static class ThemeService
         (byte)Math.Clamp((int)Math.Round(color.R * factor), 0, 255),
         (byte)Math.Clamp((int)Math.Round(color.G * factor), 0, 255),
         (byte)Math.Clamp((int)Math.Round(color.B * factor), 0, 255));
-    private static Brush StripedBrush(Color green)
+    public static Brush CreateAnimatedDiagonalStripeBrush(Color green)
     {
+        const double stripePeriod = 28;
         var dark = Darken(green, 0.50);
-        return new LinearGradientBrush(
-            [new GradientStop(dark, 0), new GradientStop(dark, 0.58), new GradientStop(green, 0.59),
-             new GradientStop(green, 0.78), new GradientStop(dark, 0.79), new GradientStop(dark, 1)],
-            new Point(0, 0), new Point(0.12, 0.12)) { SpreadMethod = GradientSpreadMethod.Repeat };
-    }
-
-    private static Brush AnimatedStripedBrush(Color green)
-    {
-        var brush = (LinearGradientBrush)StripedBrush(green);
+        var brush = new LinearGradientBrush
+        {
+            MappingMode = BrushMappingMode.Absolute,
+            StartPoint = new Point(0, 0),
+            EndPoint = new Point(stripePeriod / 2, stripePeriod / 2),
+            SpreadMethod = GradientSpreadMethod.Repeat,
+            GradientStops =
+            [
+                new GradientStop(dark, 0),
+                new GradientStop(dark, 0.49),
+                new GradientStop(green, 0.50),
+                new GradientStop(green, 0.99),
+                new GradientStop(dark, 1)
+            ]
+        };
         var movement = new TranslateTransform();
-        brush.RelativeTransform = movement;
+        brush.Transform = movement;
         movement.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation
         {
             From = 0,
-            To = 0.12,
+            To = stripePeriod,
             Duration = TimeSpan.FromMilliseconds(850),
             RepeatBehavior = RepeatBehavior.Forever
         });

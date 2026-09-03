@@ -63,7 +63,8 @@ public sealed record WindowsIsoSelection(
     IReadOnlyList<string> DriverFolders,
     IReadOnlyList<string> DriverFiles,
     IReadOnlyList<string> DriverArchives,
-    bool ForceUnsigned)
+    bool ForceUnsigned,
+    string CompressionMode)
 {
     public bool AddDrivers => DriverFolders.Count + DriverFiles.Count + DriverArchives.Count > 0;
 }
