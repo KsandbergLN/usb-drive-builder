@@ -59,6 +59,12 @@ public partial class PartitionContentDialog : Window
         IsoExtrasSection.Visibility = isNtfs ? Visibility.Visible : Visibility.Collapsed;
         StandardButtons.Columns = isNtfs ? 3 : 1;
         Width = isNtfs ? 620 : 390;
+        GenerateAutounattendCheckBox.Visibility = isNtfs && _partition.HasIso ? Visibility.Visible : Visibility.Collapsed;
+        GenerateAutounattendCheckBox.IsEnabled = string.IsNullOrWhiteSpace(_partition.AutounattendSource) && _partition.FolderXmlSource is null;
+        GenerateAutounattendCheckBox.IsChecked = _partition.GenerateAutounattend;
+        GenerateAutounattendCheckBox.ToolTip = GenerateAutounattendCheckBox.IsEnabled
+            ? "Create a new Autounattend.xml using the Generated Windows Setup defaults in Config."
+            : "A selected Autounattend.xml already takes precedence. Clear it before generating a new one.";
         SetSelected(FilesButton, _partition.SourceFiles.Count + _partition.SourceFolders.Count > 0);
         SetSelected(XmlButton, _partition.HasAutounattend);
         SetSelected(IsoButton, _partition.HasIso);
@@ -87,6 +93,14 @@ public partial class PartitionContentDialog : Window
     private async void Iso_Click(object sender, RoutedEventArgs e) => await ExecuteAsync(PartitionContentAction.Iso);
     private async void ScriptFiles_Click(object sender, RoutedEventArgs e) => await ExecuteAsync(PartitionContentAction.ScriptFiles);
     private async void Drivers_Click(object sender, RoutedEventArgs e) => await ExecuteAsync(PartitionContentAction.Drivers);
+    private void GenerateAutounattend_Checked(object sender, RoutedEventArgs e)
+    {
+        if (!_busy && GenerateAutounattendCheckBox.IsEnabled) _partition.GenerateAutounattend = true;
+    }
+    private void GenerateAutounattend_Unchecked(object sender, RoutedEventArgs e)
+    {
+        if (!_busy) _partition.GenerateAutounattend = false;
+    }
     private void Close_Click(object sender, RoutedEventArgs e) { if (!_busy) Close(); }
 
     private void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)

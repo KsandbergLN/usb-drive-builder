@@ -4,3 +4,4 @@ obj/
 # Self-contained release executables exceed GitHub's 100 MB file limit.
 # Keep them locally and publish them as GitHub Release assets instead.
 dist/*.exe
+dist/*.dll

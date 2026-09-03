@@ -16,6 +16,7 @@ namespace LaptopQaUsbBuilder;
 
 public partial class ConfigWindow : Window, INotifyPropertyChanged
 {
+    private static readonly string[] CacheDirectoryNames = ["MediaCache", "DriverPackCache", "DriverPayloadCache"];
     private static readonly IReadOnlyList<OobeLanguageOption> OobeLanguages =
     [
         new("en-US", "English (United States)"), new("es-ES", "Spanish (Spain)"), new("fr-FR", "French (France)"), new("de-DE", "German (Germany)"),
@@ -81,9 +82,131 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
         OobeKeyboardPicker.SelectedItem = OobeKeyboards.FirstOrDefault(option => option.Code.Equals(WindowsSetup.OobeKeyboard, StringComparison.OrdinalIgnoreCase)) ?? OobeKeyboards[0];
         ApplyLanguage();
         ThemeService.Apply(this, SelectedTheme);
-        Loaded += (_, _) => ThemeService.Apply(this, SelectedTheme);
+        Loaded += async (_, _) =>
+        {
+            ThemeService.Apply(this, SelectedTheme);
+            await RefreshCacheSizeAsync();
+        };
         SetDefaultsLocked();
     }
+
+    private async Task RefreshCacheSizeAsync()
+    {
+        CacheSizeText.Text = "Calculating cache size...";
+        var size = await Task.Run(GetCacheSize);
+        CacheSizeText.Text = size == 0
+            ? "No cached Windows media or temporary driver data."
+            : $"{FormatBytes(size)} cached locally. Logs and saved settings are not included.";
+        ClearCacheButton.IsEnabled = size > 0;
+    }
+
+    private async void ClearCache_Click(object sender, RoutedEventArgs e)
+    {
+        var size = await Task.Run(GetCacheSize);
+        if (size == 0)
+        {
+            await RefreshCacheSizeAsync();
+            return;
+        }
+        if (ThemedMessageDialog.Show(this,
+                $"Delete {FormatBytes(size)} of cached Windows media and temporary driver data?\n\nBuild logs and saved settings will be kept.",
+                "Clear build cache", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No) != MessageBoxResult.Yes)
+            return;
+
+        ClearCacheButton.IsEnabled = false;
+        CacheSizeText.Text = "Clearing cache...";
+        var result = await Task.Run(ClearCache);
+        await RefreshCacheSizeAsync();
+        if (!result.Acquired)
+        {
+            ThemedMessageDialog.Show(this,
+                "The cache is currently being used by another USB Drive Builder window. Close that build or wait for media preparation to finish, then try again.",
+                "Cache in use", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        if (result.RemainingBytes > 0)
+        {
+            ThemedMessageDialog.Show(this,
+                $"Most cached data was removed, but {FormatBytes(result.RemainingBytes)} is still locked or in use. Close other programs that may be scanning those files and try again.",
+                "Cache partially cleared", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        ThemedMessageDialog.Show(this, "The build cache was cleared. Logs and saved settings were kept.",
+            "Cache cleared", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    private static CacheClearResult ClearCache()
+    {
+        Semaphore? guard = null;
+        var acquired = false;
+        try
+        {
+            guard = new Semaphore(1, 1, MainWindow.CacheCleanupGuardName);
+            acquired = guard.WaitOne(0);
+            if (!acquired) return new CacheClearResult(false, GetCacheSize());
+            foreach (var path in GetCachePaths())
+            {
+                for (var attempt = 0; attempt < 3 && Directory.Exists(path); attempt++)
+                {
+                    try { Directory.Delete(path, true); }
+                    catch (IOException) { Thread.Sleep(150); }
+                    catch (UnauthorizedAccessException) { Thread.Sleep(150); }
+                }
+            }
+            return new CacheClearResult(true, GetCacheSize());
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return new CacheClearResult(false, GetCacheSize());
+        }
+        finally
+        {
+            if (acquired)
+            {
+                try { guard?.Release(); }
+                catch (SemaphoreFullException) { }
+            }
+            guard?.Dispose();
+        }
+    }
+
+    private static long GetCacheSize()
+    {
+        long total = 0;
+        foreach (var path in GetCachePaths())
+        {
+            if (!Directory.Exists(path)) continue;
+            try
+            {
+                foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+                {
+                    try { total += new FileInfo(file).Length; }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+        return total;
+    }
+
+    private static IEnumerable<string> GetCachePaths()
+    {
+        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LaptopQAUsbBuilder");
+        return CacheDirectoryNames.Select(name => Path.Combine(root, name));
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        string[] units = ["B", "KB", "MB", "GB", "TB"];
+        var value = (double)Math.Max(0, bytes);
+        var unit = 0;
+        while (value >= 1024 && unit < units.Length - 1) { value /= 1024; unit++; }
+        return $"{value:0.##} {units[unit]}";
+    }
+
+    private readonly record struct CacheClearResult(bool Acquired, long RemainingBytes);
 
     private void AddDefaultPartition_Click(object sender, RoutedEventArgs e)
     {
@@ -484,6 +607,8 @@ public sealed class PartitionConfig
     [JsonIgnore]
     public string? PreparedAutounattendXml { get; set; }
     [JsonIgnore]
+    public bool GenerateAutounattend { get; set; }
+    [JsonIgnore]
     public long SelectedContentBytes { get; set; }
     [JsonIgnore]
     public long LargestSelectedFileBytes { get; set; }
@@ -492,12 +617,12 @@ public sealed class PartitionConfig
     public bool IsRemaining => SizeText.Trim() == "*";
     public string PreviewText => $"{CalculatedSizeText ?? SizeText}  |  {FileSystem}";
     public string? FolderXmlSource => SourceFolders.Select(FindRootXmlFile).FirstOrDefault(path => path is not null);
-    public bool HasAutounattend => !string.IsNullOrWhiteSpace(AutounattendSource) || FolderXmlSource is not null;
+    public bool HasAutounattend => GenerateAutounattend || !string.IsNullOrWhiteSpace(AutounattendSource) || FolderXmlSource is not null;
     public bool HasIso => !string.IsNullOrWhiteSpace(IsoSource);
     public bool HasScripts => ScriptFiles.Count > 0;
     public bool HasDrivers => DriverFolders.Count + DriverFiles.Count + DriverArchives.Count > 0;
     public bool HasAnyContent => SourceFiles.Count + SourceFolders.Count + ScriptFiles.Count > 0 ||
-                                 !string.IsNullOrWhiteSpace(AutounattendSource) || HasIso || HasDrivers;
+                                 HasAutounattend || HasIso || HasDrivers;
     public string AddedContentSummary
     {
         get
@@ -512,7 +637,9 @@ public sealed class PartitionConfig
             return string.Join("  •  ", labels);
         }
     }
-    public string AutounattendToolTip => !string.IsNullOrWhiteSpace(AutounattendSource)
+    public string AutounattendToolTip => GenerateAutounattend
+        ? "A new Autounattend.xml will be generated from the Windows Setup defaults in Config."
+        : !string.IsNullOrWhiteSpace(AutounattendSource)
         ? $"Autounattend.xml selected:\n{AutounattendSource}"
         : FolderXmlSource is not null
             ? $"XML detected in a selected folder:\n{FolderXmlSource}"
@@ -529,6 +656,7 @@ public sealed class PartitionConfig
             SourceFiles.Select(path => $"File: {path}")
                 .Concat(SourceFolders.Select(path => $"Folder: {path}"))
                 .Concat(ScriptFiles.Select(path => $"Setup script/support file: {path}"))
+                .Concat(GenerateAutounattend ? ["Autounattend.xml: generated from Config defaults"] : [])
                 .Concat(string.IsNullOrWhiteSpace(AutounattendSource) ? [] : [$"Autounattend.xml: {AutounattendSource}"])
                 .Concat(string.IsNullOrWhiteSpace(IsoSource) ? [] : [$"ISO: {IsoSource}"])
                 .Concat(string.IsNullOrWhiteSpace(IsoEditionName) ? [] : [$"Windows edition: {IsoEditionName}"])
@@ -542,6 +670,7 @@ public sealed class PartitionConfig
         foreach (var path in SourceFolders) clone.SourceFolders.Add(path);
         foreach (var path in ScriptFiles) clone.ScriptFiles.Add(path);
         clone.AutounattendSource = AutounattendSource;
+        clone.GenerateAutounattend = GenerateAutounattend;
         clone.IsoSource = IsoSource;
         clone.IsoEditionIndex = IsoEditionIndex;
         clone.IsoEditionName = IsoEditionName;
@@ -563,6 +692,7 @@ public sealed class PartitionConfig
         ForceUnsignedDrivers = false;
         PreparedMediaPath = null;
         PreparedAutounattendXml = null;
+        GenerateAutounattend = false;
         ExtractedIsoBytes = null;
         ScriptFiles.Clear();
     }

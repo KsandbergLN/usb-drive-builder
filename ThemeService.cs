@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 
 namespace LaptopQaUsbBuilder;
 
@@ -38,7 +39,13 @@ public static class ThemeService
             window.Resources["DriveCardBackground"] = Brush(name == "Light" ? "#EFF3F1" : name == "AMOLED" ? "#090909" : "#52656C");
             window.Resources["DriveCardBorder"] = Brush(name == "Light" ? "#A9BABF" : name == "AMOLED" ? "#666666" : "#91A3AA");
             window.Resources["DriveSelectedBackground"] = Brush(name == "Light" ? "#D7F3E5" : name == "AMOLED" ? "#0B3B25" : "#176044");
-            window.Resources["DriveSelectedBorder"] = Brush(name == "Light" ? "#20B86A" : name == "AMOLED" ? "#35E58A" : "#48D998");
+            var driveSelectedBorder = Brush(name == "Light" ? "#20B86A" : name == "AMOLED" ? "#35E58A" : "#48D998");
+            window.Resources["DriveSelectedBorder"] = driveSelectedBorder;
+            window.Resources["DriveActiveBackground"] = AnimatedStripedBrush(driveSelectedBorder.Color);
+            window.Resources["DriveCompletedBackground"] = Brush(Darken(driveSelectedBorder.Color, 0.58));
+            window.Resources["DriveProgressText"] = Brush("#F7FFFB");
+            window.Resources["DriveFailedBackground"] = Brush(name == "AMOLED" ? "#9E3039" : name == "Dark" ? "#B94D56" : "#C75E63");
+            window.Resources["DriveFailedBorder"] = Brush(name == "AMOLED" ? "#FF7C86" : "#AE3338");
             window.Resources["DriveText"] = Brush(text);
             window.Resources["DriveMutedText"] = Brush(muted);
             window.Resources["DriveHoverBorder"] = Brush(name == "Light" ? "#526970" : name == "AMOLED" ? "#E5E5E5" : "#D5E3E7");
@@ -108,4 +115,32 @@ public static class ThemeService
             target.SetValue(property, Brush(replacement));
     }
     private static SolidColorBrush Brush(string value) => new((Color)ColorConverter.ConvertFromString(value));
+    private static SolidColorBrush Brush(Color value) => new(value);
+    private static Color Darken(Color color, double factor) => Color.FromRgb(
+        (byte)Math.Clamp((int)Math.Round(color.R * factor), 0, 255),
+        (byte)Math.Clamp((int)Math.Round(color.G * factor), 0, 255),
+        (byte)Math.Clamp((int)Math.Round(color.B * factor), 0, 255));
+    private static Brush StripedBrush(Color green)
+    {
+        var dark = Darken(green, 0.50);
+        return new LinearGradientBrush(
+            [new GradientStop(dark, 0), new GradientStop(dark, 0.58), new GradientStop(green, 0.59),
+             new GradientStop(green, 0.78), new GradientStop(dark, 0.79), new GradientStop(dark, 1)],
+            new Point(0, 0), new Point(0.12, 0.12)) { SpreadMethod = GradientSpreadMethod.Repeat };
+    }
+
+    private static Brush AnimatedStripedBrush(Color green)
+    {
+        var brush = (LinearGradientBrush)StripedBrush(green);
+        var movement = new TranslateTransform();
+        brush.RelativeTransform = movement;
+        movement.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation
+        {
+            From = 0,
+            To = 0.12,
+            Duration = TimeSpan.FromMilliseconds(850),
+            RepeatBehavior = RepeatBehavior.Forever
+        });
+        return brush;
+    }
 }
