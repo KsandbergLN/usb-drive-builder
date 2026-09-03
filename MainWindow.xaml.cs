@@ -64,7 +64,7 @@ public partial class MainWindow : Window
     private double _sharedPreparationStageStart;
     private double _sharedPreparationStageEnd;
     private double _queuePreparationShare;
-    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.100"}";
+    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.105"}";
     private const string MainPartitionDragFormat = "LaptopQaUsbBuilder.MainPartition";
     private const string ScriptRunnerName = "LaptopQA-RunScripts.cmd";
     private const string ScriptCleanupName = "LaptopQA-Cleanup.ps1";
@@ -75,7 +75,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        BorderlessWindowResizer.Attach(this);
+        BorderlessWindowResizer.Attach(this, 1360, 800);
         var workArea = SystemParameters.WorkArea;
         Width = Math.Min(1180, Math.Max(MinWidth, workArea.Width - 32));
         Height = Math.Min(700, Math.Max(MinHeight, workArea.Height - 32));
@@ -227,6 +227,7 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             Log($"Unexpected build error: {LogSanitizer.SanitizeException(ex)}");
+            SetBuildProgressFinished(false);
             if (_isBuilding) SetBuildingState(false);
             MessageBox.Show($"The build could not continue.\n\n{ex.Message}\n\nLog: {_logPath}",
                 "Build failed", MessageBoxButton.OK, MessageBoxImage.Error);
@@ -242,6 +243,7 @@ public partial class MainWindow : Window
         }
         if (cancelled)
         {
+            SetBuildProgressFinished(false, preserveValue: true);
             SetNonTransferActivity(cancellationCleanupComplete
                 ? "Cancelled — temporary staging cleaned up"
                 : "Cancelled — locked staging will be retried on close");
@@ -404,7 +406,7 @@ public partial class MainWindow : Window
                 partition.ForceUnsignedDrivers = partition.HasDrivers && _preferences.ForceUnsignedDrivers;
                 var selection = new WindowsIsoSelection(edition.Index, edition.Name, edition.EditionId,
                     partition.DriverFolders.ToArray(), partition.DriverFiles.ToArray(), partition.DriverArchives.ToArray(),
-                    partition.ForceUnsignedDrivers);
+                    partition.ForceUnsignedDrivers, _preferences.ImageCompression);
                 var preparer = new WindowsMediaPreparer(
                     SetMediaPreparationActivity,
                     UpdateDismActivity,
@@ -532,6 +534,7 @@ public partial class MainWindow : Window
         _activeQueueDriveIndex = -1;
         RenderQueueDriveProgress();
         CompleteEtaTracking();
+        SetBuildProgressFinished(failures.Count == 0);
         SetBuildingState(false);
         ConfirmText.Clear();
         _preservePreparedMediaForRetry = failures.Count > 0 && _partitions.Any(partition =>
@@ -1047,9 +1050,11 @@ public partial class MainWindow : Window
         SetNonTransferActivity($"Copying {partition.IsoEditionName ?? "Windows"} media...");
         AddActivity($"Copying prepared {partition.IsoEditionName ?? "Windows"} media to {partition.Name}.");
         await CopySourceAsync(partition.PreparedMediaPath, destination, $"{partition.Name} Windows media", startProgress, endProgress);
+        var destinationSources = Path.Combine(destination, "sources");
         if (!File.Exists(Path.Combine(destination, "efi", "boot", "bootx64.efi")) ||
             !File.Exists(Path.Combine(destination, "sources", "boot.wim")) ||
-            !File.Exists(Path.Combine(destination, "sources", "install.wim")) ||
+            (!File.Exists(Path.Combine(destinationSources, "install.wim")) &&
+             !File.Exists(Path.Combine(destinationSources, "install.esd"))) ||
             !File.Exists(Path.Combine(destination, "bootmgr")) ||
             !File.Exists(Path.Combine(destination, "boot", "bcd")) ||
             !File.Exists(Path.Combine(destination, "efi", "microsoft", "boot", "bcd")))
@@ -1523,6 +1528,7 @@ public partial class MainWindow : Window
         else if (lower.StartsWith("injecting driver folder ") || lower.StartsWith("injecting individual driver ")) SetSharedPreparationStage(73, 84);
         else if (lower.StartsWith("retrying ")) SetSharedPreparationStage(76, 84);
         else if (lower.StartsWith("committing ")) SetSharedPreparationStage(84, 98);
+        else if (lower.StartsWith("compacting serviced ") || lower.StartsWith("creating smallest ")) SetSharedPreparationStage(84, 98);
         else if (lower.StartsWith("prepared ")) SetSharedPreparationStage(98, 100);
         SetNonTransferActivity(message);
         BuildProgress.IsIndeterminate = false;
@@ -1630,7 +1636,7 @@ public partial class MainWindow : Window
             var state = _queueDriveProgress[index];
             Brush background = state switch
             {
-                QueueDriveProgressState.Active => CreateStripedDriveBrush(selected.Color),
+                QueueDriveProgressState.Active => ThemeService.CreateAnimatedDiagonalStripeBrush(selected.Color),
                 QueueDriveProgressState.Completed => new SolidColorBrush(Darken(selected.Color, 0.58)),
                 QueueDriveProgressState.Failed => failed,
                 _ => pending
@@ -1670,23 +1676,19 @@ public partial class MainWindow : Window
         (byte)Math.Clamp((int)Math.Round(color.G * factor), 0, 255),
         (byte)Math.Clamp((int)Math.Round(color.B * factor), 0, 255));
 
-    private static Brush CreateStripedDriveBrush(Color green)
+    private void SetBuildProgressActive()
     {
-        var dark = Darken(green, 0.58);
-        var brush = new LinearGradientBrush(
-            [new GradientStop(green, 0), new GradientStop(green, 0.48), new GradientStop(dark, 0.49),
-             new GradientStop(dark, 0.72), new GradientStop(green, 0.73), new GradientStop(green, 1)],
-            new Point(0, 0), new Point(0.12, 0.12)) { SpreadMethod = GradientSpreadMethod.Repeat };
-        var movement = new TranslateTransform();
-        brush.RelativeTransform = movement;
-        movement.BeginAnimation(TranslateTransform.XProperty, new System.Windows.Media.Animation.DoubleAnimation
-        {
-            From = 0,
-            To = 0.12,
-            Duration = TimeSpan.FromMilliseconds(850),
-            RepeatBehavior = System.Windows.Media.Animation.RepeatBehavior.Forever
-        });
-        return brush;
+        var selected = GetThemeBrush("DriveSelectedBorder", Color.FromRgb(32, 184, 106));
+        BuildProgress.Foreground = ThemeService.CreateAnimatedDiagonalStripeBrush(selected.Color);
+    }
+
+    private void SetBuildProgressFinished(bool succeeded, bool preserveValue = false)
+    {
+        BuildProgress.IsIndeterminate = false;
+        if (!preserveValue) BuildProgress.Value = 100;
+        BuildProgress.Foreground = succeeded
+            ? GetThemeBrush("DriveCompletedBackground", Color.FromRgb(18, 107, 62))
+            : GetThemeBrush("DriveFailedBackground", Color.FromRgb(199, 94, 99));
     }
 
     private void BeginTransferActivity(string name, long totalBytes, double startProgress, double endProgress)
@@ -1943,6 +1945,7 @@ public partial class MainWindow : Window
         if (preflighting)
         {
             SetStatus("Preparing build", "#B36A13");
+            SetBuildProgressActive();
             BuildProgress.IsIndeterminate = false;
             BuildProgress.Value = 0;
             ClearQueueDriveProgress();
@@ -1954,6 +1957,7 @@ public partial class MainWindow : Window
         {
             BuildProgress.IsIndeterminate = false;
             BuildProgress.Value = 0;
+            BuildProgress.Foreground = GetThemeBrush("DriveCompletedBackground", Color.FromRgb(18, 107, 62));
             if (_queueDriveProgress.Count == 0) ClearQueueDriveProgress();
             CurrentEtaText.Text = "Current activity: Waiting";
             SetStatus(Localization.Text(_preferences.Language, "Ready"), "#147A4B");
@@ -2011,6 +2015,7 @@ public partial class MainWindow : Window
             if (!File.Exists(PreferencesPath)) return new AppPreferences();
             var result = JsonSerializer.Deserialize<AppPreferences>(File.ReadAllText(PreferencesPath), _jsonOptions) ?? new AppPreferences();
             result.Language = Localization.Resolve(result.Language).Code; result.Theme = ThemeService.Normalize(result.Theme);
+            result.ImageCompression = WindowsImageCompression.Normalize(result.ImageCompression);
             return result;
         }
         catch { return new AppPreferences(); }
@@ -2467,7 +2472,8 @@ public partial class MainWindow : Window
     private void Config_Click(object sender, RoutedEventArgs e)
     {
         var originalLanguage = _preferences.Language;
-        var dialog = new ConfigWindow(_defaultPartitions, _preferences.Language, _preferences.Theme, _preferences.ForceUnsignedDrivers, _preferences.WindowsSetup) { Owner = this };
+        var dialog = new ConfigWindow(_defaultPartitions, _preferences.Language, _preferences.Theme,
+            _preferences.ForceUnsignedDrivers, _preferences.ImageCompression, _preferences.WindowsSetup) { Owner = this };
         if (dialog.ShowDialog() != true)
         {
             Localization.ApplyCulture(originalLanguage);
@@ -2477,6 +2483,7 @@ public partial class MainWindow : Window
         _preferences.Language = dialog.SelectedLanguage;
         _preferences.Theme = dialog.SelectedTheme;
         _preferences.ForceUnsignedDrivers = dialog.ForceUnsignedDrivers;
+        _preferences.ImageCompression = dialog.SelectedImageCompression;
         _preferences.WindowsSetup = dialog.WindowsSetup;
         SaveDefaultPartitionConfig();
         SavePreferences();

@@ -119,15 +119,13 @@
                 </StackPanel>
                 <Button Grid.Column="3" Content="x" Click="Cancel_Click" Foreground="{DynamicResource ThemeText}" Background="Transparent" FontSize="18" Padding="4" VerticalAlignment="Top"/>
             </Grid>
-            <Grid Grid.Row="1" Margin="0,22,0,12"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <StackPanel Orientation="Horizontal">
+            <Grid Grid.Row="1" Margin="0,12,0,8"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                     <TextBlock x:Name="DefaultPartitionsLabel" Text="Default partitions" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,12,0"/>
-                    <Button x:Name="AddDefaultPartitionButton" Content="+" Click="AddDefaultPartition_Click" Width="30" Height="30" Padding="0" FontSize="18" Background="{DynamicResource AddButtonBackground}" Foreground="{DynamicResource AddButtonForeground}" Margin="0,0,12,0" ToolTip="Add a default partition" IsEnabled="{Binding CanAddDefaultPartitions, RelativeSource={RelativeSource AncestorType=Window}}">
+                    <Button x:Name="AddDefaultPartitionButton" Grid.Column="1" Content="+" Click="AddDefaultPartition_Click" Width="30" Height="30" Padding="0" FontSize="18" Background="{DynamicResource AddButtonBackground}" Foreground="{DynamicResource AddButtonForeground}" Margin="0,0,12,0" ToolTip="Add a default partition" IsEnabled="{Binding CanAddDefaultPartitions, RelativeSource={RelativeSource AncestorType=Window}}">
                         <Button.Style><Style TargetType="Button" BasedOn="{StaticResource CircleButton}"><Style.Triggers><Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.35"/></Trigger></Style.Triggers></Style></Button.Style>
                     </Button>
-                    <TextBlock x:Name="RemainingHint" Text="Enter * for any one partition to use all remaining disk space." Foreground="{DynamicResource ThemeMuted}" VerticalAlignment="Center"/>
-                </StackPanel>
-                <Button x:Name="DefaultsLockButton" Grid.Column="1" Content="&#xE72E;" Click="DefaultsLock_Click" Background="{DynamicResource AddButtonBackground}" Foreground="{DynamicResource AddButtonForeground}" FontFamily="Segoe MDL2 Assets" FontSize="16" Width="42" Height="36" Padding="8" Margin="12,0,0,0" ToolTip="Unlock default partition editing"/>
+                    <TextBlock x:Name="RemainingHint" Grid.Column="2" Text="Sizes: 50 MB, 20 GB, or * for all remaining space; use * exactly once. Label limits: FAT32 11, exFAT 15, NTFS 32 characters." Foreground="{DynamicResource ThemeMuted}" FontSize="10.5" TextWrapping="Wrap" VerticalAlignment="Center"/>
+                <Button x:Name="DefaultsLockButton" Grid.Column="3" Content="&#xE72E;" Click="DefaultsLock_Click" Background="{DynamicResource AddButtonBackground}" Foreground="{DynamicResource AddButtonForeground}" FontFamily="Segoe MDL2 Assets" FontSize="16" Width="42" Height="36" Padding="8" Margin="12,0,0,0" ToolTip="Unlock default partition editing"/>
             </Grid>
             <ScrollViewer Grid.Row="2" MaxHeight="258" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
             <StackPanel>
@@ -194,10 +192,17 @@
                     </Grid>
                 </Border>
                 <Border Background="{DynamicResource ThemeCard}" BorderBrush="{DynamicResource ThemeStroke}" BorderThickness="1" CornerRadius="10" Padding="11,8" Margin="0,0,0,8">
-                    <StackPanel>
-                        <CheckBox x:Name="ForceUnsignedDriversCheckBox" Content="Allow unsigned drivers (DISM /ForceUnsigned)" FontWeight="SemiBold"/>
-                        <TextBlock Text="Only applies when driver injection is selected. Windows or Secure Boot may still refuse to load unsigned drivers." Foreground="{DynamicResource ThemeMuted}" FontSize="11" TextWrapping="Wrap" Margin="22,3,0,0"/>
-                    </StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="320"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                        <StackPanel Margin="0,0,18,0">
+                            <TextBlock Text="Windows image compression" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                            <ComboBox x:Name="ImageCompressionPicker" Height="32" ToolTip="Choose the size and preparation-speed balance for the final Windows installation image."/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                            <CheckBox x:Name="ForceUnsignedDriversCheckBox" Content="Allow unsigned drivers (DISM /ForceUnsigned)" FontWeight="SemiBold"/>
+                            <TextBlock Text="Only applies when driver injection is selected. Windows or Secure Boot may still refuse to load unsigned drivers." Foreground="{DynamicResource ThemeMuted}" FontSize="11" TextWrapping="Wrap" Margin="22,3,0,0"/>
+                        </StackPanel>
+                    </Grid>
                 </Border>
                 <Border Background="{DynamicResource ThemeCard}" BorderBrush="{DynamicResource ThemeStroke}" BorderThickness="1" CornerRadius="10" Padding="11,8" Margin="0,0,0,8">
                     <Grid>
@@ -211,7 +216,6 @@
                                 ToolTip="Delete cached Windows media and temporary driver data. Logs and saved settings are kept."/>
                     </Grid>
                 </Border>
-                <TextBlock x:Name="SizeHelpText" Text="Size entries: 50 MB, 20 GB, or * for all remaining space. Use * for exactly one partition in any position. Volume-label limits: FAT32 up to 11 characters; exFAT up to 15; NTFS up to 32." Foreground="{DynamicResource ThemeMuted}" TextWrapping="Wrap"/>
             </StackPanel>
             <Grid Grid.Row="4" Margin="0,18,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="110"/><ColumnDefinition Width="110"/></Grid.ColumnDefinitions>
                 <Button x:Name="CancelButton" Grid.Column="1" Content="Cancel" Click="Cancel_Click" Margin="8,0"/>

@@ -33,6 +33,12 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
         new("Windows 11 Pro"), new("Windows 11 Home"), new("Windows 11 Pro N"), new("Windows 11 Education"), new("Windows 11 Enterprise"),
         new("Windows 10 Pro"), new("Windows 10 Home"), new("Windows 10 Pro N"), new("Windows 10 Education"), new("Windows 10 Enterprise")
     ];
+    private static readonly IReadOnlyList<ImageCompressionOption> ImageCompressionOptions =
+    [
+        new(WindowsImageCompression.Fast, "FAST (Fastest, largest)"),
+        new(WindowsImageCompression.Max, "MAX (Slow, Smaller)"),
+        new(WindowsImageCompression.Esd, "ESD (Slowest, Smallest)")
+    ];
     private readonly ObservableCollection<PartitionConfig> _items;
     private readonly string _originalTheme;
     private bool _defaultsLocked = true;
@@ -46,22 +52,25 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
     public string SelectedLanguage { get; private set; }
     public string SelectedTheme { get; private set; }
     public bool ForceUnsignedDrivers { get; private set; }
+    public string SelectedImageCompression { get; private set; }
     public WindowsSetupConfig WindowsSetup { get; private set; }
     public bool CanAddDefaultPartitions => !_defaultsLocked && _items.Count < 4;
     public bool CanRemoveDefaultPartitions => !_defaultsLocked && _items.Count > 1;
     public bool DefaultsEditable => !_defaultsLocked;
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    public ConfigWindow(IEnumerable<PartitionConfig> current, string language, string theme, bool forceUnsignedDrivers, WindowsSetupConfig? windowsSetup = null)
+    public ConfigWindow(IEnumerable<PartitionConfig> current, string language, string theme, bool forceUnsignedDrivers,
+        string imageCompression, WindowsSetupConfig? windowsSetup = null)
     {
         InitializeComponent();
-        BorderlessWindowResizer.Attach(this);
+        BorderlessWindowResizer.Attach(this, 940, 760);
         var workArea = SystemParameters.WorkArea;
         Width = Math.Min(820, Math.Max(MinWidth, workArea.Width - 64));
         Height = Math.Min(660, Math.Max(MinHeight, workArea.Height - 64));
         SelectedLanguage = Localization.Resolve(language).Code;
         SelectedTheme = ThemeService.Normalize(theme);
         ForceUnsignedDrivers = forceUnsignedDrivers;
+        SelectedImageCompression = WindowsImageCompression.Normalize(imageCompression);
         WindowsSetup = windowsSetup?.Clone() ?? new WindowsSetupConfig();
         _originalTheme = SelectedTheme;
         _items = new ObservableCollection<PartitionConfig>(current.Select(p => p.Clone()));
@@ -73,6 +82,8 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
         LanguagePicker.SelectedItem = Localization.Resolve(SelectedLanguage);
         RebuildThemeChoices();
         ForceUnsignedDriversCheckBox.IsChecked = ForceUnsignedDrivers;
+        ImageCompressionPicker.ItemsSource = ImageCompressionOptions;
+        ImageCompressionPicker.SelectedItem = ImageCompressionOptions.First(option => option.Key == SelectedImageCompression);
         TargetDiskTextBox.Text = WindowsSetup.TargetDisk.ToString(); InstallPartitionTextBox.Text = WindowsSetup.InstallPartition.ToString();
         EfiSizeTextBox.Text = WindowsSetup.EfiSizeMb.ToString(); MsrSizeTextBox.Text = WindowsSetup.MsrSizeMb.ToString(); WindowsShrinkTextBox.Text = WindowsSetup.WindowsShrinkMb.ToString();
         EfiLabelTextBox.Text = WindowsSetup.EfiLabel; WindowsLabelTextBox.Text = WindowsSetup.WindowsLabel; RecoveryLabelTextBox.Text = WindowsSetup.RecoveryLabel;
@@ -373,6 +384,7 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
         SelectedLanguage = (LanguagePicker.SelectedItem as LanguageOption)?.Code ?? "en-US";
         SelectedTheme = (ThemePicker.SelectedItem as ThemeOption)?.Key ?? "Light";
         ForceUnsignedDrivers = ForceUnsignedDriversCheckBox.IsChecked == true;
+        SelectedImageCompression = (ImageCompressionPicker.SelectedItem as ImageCompressionOption)?.Key ?? WindowsImageCompression.Esd;
         WindowsSetup = ReadWindowsSetup();
         DialogResult = true;
     }
@@ -497,9 +509,9 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
     {
         string T(string key) => Localization.Text(SelectedLanguage, key);
         DialogTitleText.Text = "Configuration"; DialogSubtitleText.Text = "Configure default partitions and Windows image servicing.";
-        LanguageLabel.Text = T("Language"); ThemeLabel.Text = T("Theme"); DefaultPartitionsLabel.Text = "Default partitions"; RemainingHint.Text = T("Remaining Hint");
+        LanguageLabel.Text = T("Language"); ThemeLabel.Text = T("Theme"); DefaultPartitionsLabel.Text = "Default partitions";
+        RemainingHint.Text = T("Size Help") + "  Label limits: FAT32 11, exFAT 15, NTFS 32 characters.";
         VolumeLabelColumn.Header = T("Volume label"); SizeColumn.Header = T("Size Header"); FormatColumn.Header = T("Format");
-        SizeHelpText.Text = T("Size Help") + "  Volume-label limits: FAT32 up to 11 characters; exFAT up to 15; NTFS up to 32.";
         CancelButton.Content = T("Cancel"); SaveButton.Content = T("Save");
     }
 }
@@ -535,6 +547,11 @@ public sealed record OobeKeyboardOption(string Code, string Name)
 }
 
 public sealed record WindowsEditionOption(string Name)
+{
+    public override string ToString() => Name;
+}
+
+public sealed record ImageCompressionOption(string Key, string Name)
 {
     public override string ToString() => Name;
 }

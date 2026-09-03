@@ -8,7 +8,19 @@ public sealed class AppPreferences
     public string Language { get; set; } = "en-US";
     public string Theme { get; set; } = "Light";
     public bool ForceUnsignedDrivers { get; set; }
+    public string ImageCompression { get; set; } = WindowsImageCompression.Esd;
     public WindowsSetupConfig WindowsSetup { get; set; } = new();
+}
+
+public static class WindowsImageCompression
+{
+    public const string Fast = "FAST";
+    public const string Max = "MAX";
+    public const string Esd = "ESD";
+    public static readonly string[] Values = [Fast, Max, Esd];
+
+    public static string Normalize(string? value) =>
+        Values.FirstOrDefault(item => item.Equals(value, StringComparison.OrdinalIgnoreCase)) ?? Esd;
 }
 
 public sealed record LanguageOption(string Code, string Name)
