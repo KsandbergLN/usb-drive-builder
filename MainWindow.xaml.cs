@@ -19,6 +19,10 @@ namespace LaptopQaUsbBuilder;
 
 public partial class MainWindow : Window
 {
+    // Standard Windows 10/11 Pro generic installation key. This selects the
+    // edition during Setup; it does not activate Windows.
+    private const string GenericWindowsProProductKey = "VK7JG-NPHTM-C97JM-9MPGT-3V66T";
+
     public string CurrentTheme => _preferences.Theme;
     private readonly JsonSerializerOptions _jsonOptions = new() { PropertyNameCaseInsensitive = true };
     private bool _isBuilding;
@@ -864,7 +868,16 @@ public partial class MainWindow : Window
                     new XElement(unattend + "MetaData", new XAttribute(wcm + "action", "add"), new XElement(unattend + "Key", "/IMAGE/NAME"), new XElement(unattend + "Value", setup.Edition))),
                 new XElement(unattend + "InstallTo", new XElement(unattend + "DiskID", setup.TargetDisk), new XElement(unattend + "PartitionID", setup.InstallPartition))));
         component.Add(imageInstall);
-        component.Add(new XElement(unattend + "UserData", new XElement(unattend + "AcceptEula", "true")));
+        var userData = new XElement(unattend + "UserData",
+            new XElement(unattend + "AcceptEula", "true"));
+        if (setup.Edition.Equals("Windows 11 Pro", StringComparison.OrdinalIgnoreCase) ||
+            setup.Edition.Equals("Windows 10 Pro", StringComparison.OrdinalIgnoreCase))
+        {
+            userData.AddFirst(new XElement(unattend + "ProductKey",
+                new XElement(unattend + "Key", GenericWindowsProProductKey),
+                new XElement(unattend + "WillShowUI", "Never")));
+        }
+        component.Add(userData);
         component.Add(new XElement(unattend + "UseConfigurationSet", "true"));
 
         // Windows PE can reliably execute a short command at a time.  Keep the partition
