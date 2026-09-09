@@ -12,7 +12,7 @@
           <InstallTo><DiskID>0</DiskID><PartitionID>3</PartitionID></InstallTo>
         </OSImage>
       </ImageInstall>
-      <UserData><AcceptEula>true</AcceptEula></UserData>
+      <UserData><ProductKey><Key>VK7JG-NPHTM-C97JM-9MPGT-3V66T</Key><WillShowUI>Never</WillShowUI></ProductKey><AcceptEula>true</AcceptEula></UserData>
       <UseConfigurationSet>true</UseConfigurationSet>
       <RunSynchronous>
         <RunSynchronousCommand wcm:action="add"><Order>1</Order><Description>Create reimage confirmation</Description><Path>cmd.exe /c echo answer = MsgBox^("Windows Setup is ready to reimage this computer." ^&amp; vbCrLf ^&amp; vbCrLf ^&amp; "This will erase all data on Disk 0 and install a fresh copy of Windows." ^&amp; vbCrLf ^&amp; vbCrLf ^&amp; "Select Yes to begin, or No to return without making changes.", vbYesNo + vbQuestion + vbDefaultButton2, "Ready to Reimage"^) &gt; X:\confirm-reimage.vbs</Path></RunSynchronousCommand>
