@@ -11,6 +11,12 @@ public partial class WindowsIsoOptionsDialog : Window
     public WindowsIsoOptionsDialog(string isoPath, IReadOnlyList<WindowsImageEdition> editions, string theme)
     {
         InitializeComponent();
+        if (Directory.Exists(isoPath))
+        {
+            Title = "Windows Installer Folder";
+            DialogTitleText.Text = Title;
+            AcceptButton.Content = "Use folder";
+        }
         IsoNameText.Text = Path.GetFileName(isoPath);
         IsoNameText.ToolTip = isoPath;
         EditionPicker.ItemsSource = editions;

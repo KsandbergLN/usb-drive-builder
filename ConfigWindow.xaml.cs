@@ -11,6 +11,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using Microsoft.Win32;
 using System.Text;
+using System.Text.Json;
 
 namespace LaptopQaUsbBuilder;
 
@@ -48,6 +49,12 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
     private int _defaultDropDestinationIndex = -1;
     private const string DefaultPartitionDragFormat = "LaptopQaUsbBuilder.DefaultPartition";
     private const double PartitionDragStartDistance = 12;
+    private readonly ObservableCollection<ConfigurationProfile> _profiles;
+    private ConfigurationProfile? _selectedProfile;
+    private bool _changingProfile;
+    private string _loadedProfileState = "";
+    public List<ConfigurationProfile> Profiles => _profiles.Select(p => p.Clone()).ToList();
+    public string? SelectedProfileId => _selectedProfile?.Id;
     public List<PartitionConfig> Result { get; private set; } = [];
     public string SelectedLanguage { get; private set; }
     public string SelectedTheme { get; private set; }
@@ -60,13 +67,14 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
     public event PropertyChangedEventHandler? PropertyChanged;
 
     public ConfigWindow(IEnumerable<PartitionConfig> current, string language, string theme, bool forceUnsignedDrivers,
-        string imageCompression, WindowsSetupConfig? windowsSetup = null)
+        string imageCompression, WindowsSetupConfig? windowsSetup = null,
+        IEnumerable<ConfigurationProfile>? profiles = null, string? selectedProfileId = null)
     {
         InitializeComponent();
-        BorderlessWindowResizer.Attach(this, 940, 760);
+        BorderlessWindowResizer.Attach(this, 940, 840);
         var workArea = SystemParameters.WorkArea;
         Width = Math.Min(820, Math.Max(MinWidth, workArea.Width - 64));
-        Height = Math.Min(660, Math.Max(MinHeight, workArea.Height - 64));
+        Height = Math.Min(733, Math.Max(MinHeight, workArea.Height - 64));
         SelectedLanguage = Localization.Resolve(language).Code;
         SelectedTheme = ThemeService.Normalize(theme);
         ForceUnsignedDrivers = forceUnsignedDrivers;
@@ -74,6 +82,7 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
         WindowsSetup = windowsSetup?.Clone() ?? new WindowsSetupConfig();
         _originalTheme = SelectedTheme;
         _items = new ObservableCollection<PartitionConfig>(current.Select(p => p.Clone()));
+        _profiles = new ObservableCollection<ConfigurationProfile>((profiles ?? []).Select(p => p.Clone()));
         PartitionGrid.ItemsSource = _items;
         RemoveButtonsList.ItemsSource = _items;
         ReorderHandlesList.ItemsSource = _items;
@@ -91,6 +100,7 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
         EditionPicker.ItemsSource = WindowsEditions;
         EditionPicker.SelectedItem = WindowsEditions.FirstOrDefault(option => option.Name.Equals(WindowsSetup.Edition, StringComparison.OrdinalIgnoreCase)) ?? WindowsEditions[0];
         PromptBeforeInstallCheckBox.IsChecked = WindowsSetup.PromptBeforeInstall;
+        RequireEmptyDiskCheckBox.IsChecked = WindowsSetup.RequireEmptyDisk200Gb;
         OobeLanguagePicker.ItemsSource = OobeLanguages; OobeKeyboardPicker.ItemsSource = OobeKeyboards;
         OobeLanguagePicker.SelectedItem = OobeLanguages.FirstOrDefault(option => option.Code.Equals(WindowsSetup.OobeLanguage, StringComparison.OrdinalIgnoreCase)) ?? OobeLanguages[0];
         OobeKeyboardPicker.SelectedItem = OobeKeyboards.FirstOrDefault(option => option.Code.Equals(WindowsSetup.OobeKeyboard, StringComparison.OrdinalIgnoreCase)) ?? OobeKeyboards[0];
@@ -102,6 +112,120 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
             await RefreshCacheSizeAsync();
         };
         SetDefaultsLocked();
+        _changingProfile = true;
+        ProfilePicker.ItemsSource = _profiles;
+        _selectedProfile = _profiles.FirstOrDefault(p => p.Id == selectedProfileId);
+        ProfilePicker.SelectedItem = _selectedProfile;
+        RemoveProfileButton.IsEnabled = _selectedProfile is not null;
+        _changingProfile = false;
+        _loadedProfileState = CurrentProfileState();
+    }
+
+    private ConfigurationProfile CaptureProfile() => new()
+    {
+        Id = _selectedProfile?.Id ?? "", Name = _selectedProfile?.Name ?? "",
+        Partitions = _items.Select(p => p.Clone()).ToList(),
+        ForceUnsignedDrivers = ForceUnsignedDriversCheckBox.IsChecked == true,
+        ImageCompression = (ImageCompressionPicker.SelectedItem as ImageCompressionOption)?.Key ?? WindowsImageCompression.Esd,
+        WindowsSetup = ReadWindowsSetup()
+    };
+
+    // Compare raw fields as well as parsed settings so invalid input is never silently discarded.
+    private string CurrentProfileState() => JsonSerializer.Serialize(new
+    {
+        Profile = CaptureProfile(),
+        Numbers = new[] { TargetDiskTextBox.Text, InstallPartitionTextBox.Text, EfiSizeTextBox.Text, MsrSizeTextBox.Text, WindowsShrinkTextBox.Text }
+    });
+
+    private bool SaveProfile(bool asNew)
+    {
+        if (!ValidateEditor()) return false;
+        var name = _selectedProfile?.Name;
+        if (asNew || _selectedProfile is null)
+        {
+            name = ProfileNameDialog.Show(this, "Save profile as", "", SelectedTheme,
+                candidate => _profiles.Any(p => (asNew || p.Id != _selectedProfile?.Id) && p.Name.Equals(candidate, StringComparison.OrdinalIgnoreCase))
+                    ? "That name is already in use. Enter a different name." : null);
+            if (name is null) return false;
+        }
+        var profile = CaptureProfile().Clone();
+        profile.Name = name!;
+        profile.Id = asNew || _selectedProfile is null ? Guid.NewGuid().ToString("N") : _selectedProfile.Id;
+        _changingProfile = true;
+        if (!asNew && _selectedProfile is not null) _profiles[_profiles.IndexOf(_selectedProfile)] = profile;
+        else _profiles.Add(profile);
+        _selectedProfile = profile;
+        ProfilePicker.SelectedItem = profile;
+        RemoveProfileButton.IsEnabled = true;
+        _changingProfile = false;
+        _loadedProfileState = CurrentProfileState();
+        ProfileSaveStatusText.Text = $"Profile '{profile.Name}' saved in this dialog. Click Save below to keep your changes.";
+        ProfileSaveStatusText.Visibility = Visibility.Visible;
+        return true;
+    }
+
+    private void SaveProfile_Click(object sender, RoutedEventArgs e) => SaveProfile(false);
+    private void SaveProfileAsNew_Click(object sender, RoutedEventArgs e) => SaveProfile(true);
+
+    private void ProfilePicker_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_changingProfile) return;
+        var next = ProfilePicker.SelectedItem as ConfigurationProfile;
+        PartitionGrid.CommitEdit(DataGridEditingUnit.Cell, true);
+        PartitionGrid.CommitEdit(DataGridEditingUnit.Row, true);
+        if (CurrentProfileState() != _loadedProfileState)
+        {
+            var answer = ThemedMessageDialog.Show(this, "Save changes to the current profile before switching?\n\nYes saves it, No discards these edits, and Cancel stays here.",
+                "Unsaved profile changes", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+            if (answer == MessageBoxResult.Cancel || (answer == MessageBoxResult.Yes && !SaveProfile(false)))
+            {
+                _changingProfile = true;
+                ProfilePicker.SelectedItem = _selectedProfile;
+                _changingProfile = false;
+                return;
+            }
+        }
+        LoadProfile(next);
+    }
+
+    private void LoadProfile(ConfigurationProfile? profile)
+    {
+        _changingProfile = true;
+        _selectedProfile = profile;
+        ProfilePicker.SelectedItem = profile;
+        RemoveProfileButton.IsEnabled = profile is not null;
+        ProfileSaveStatusText.Visibility = Visibility.Collapsed;
+        if (profile is not null)
+        {
+            _items.Clear();
+            foreach (var partition in profile.Clone().Partitions) _items.Add(partition);
+            WindowsSetup = profile.WindowsSetup.Clone();
+            ForceUnsignedDriversCheckBox.IsChecked = profile.ForceUnsignedDrivers;
+            ImageCompressionPicker.SelectedItem = ImageCompressionOptions.First(p => p.Key == WindowsImageCompression.Normalize(profile.ImageCompression));
+            TargetDiskTextBox.Text = WindowsSetup.TargetDisk.ToString(); InstallPartitionTextBox.Text = WindowsSetup.InstallPartition.ToString();
+            EfiSizeTextBox.Text = WindowsSetup.EfiSizeMb.ToString(); MsrSizeTextBox.Text = WindowsSetup.MsrSizeMb.ToString(); WindowsShrinkTextBox.Text = WindowsSetup.WindowsShrinkMb.ToString();
+            EfiLabelTextBox.Text = WindowsSetup.EfiLabel; WindowsLabelTextBox.Text = WindowsSetup.WindowsLabel; RecoveryLabelTextBox.Text = WindowsSetup.RecoveryLabel;
+            EfiLetterTextBox.Text = WindowsSetup.EfiLetter; WindowsLetterTextBox.Text = WindowsSetup.WindowsLetter; RecoveryLetterTextBox.Text = WindowsSetup.RecoveryLetter;
+            EditionPicker.SelectedItem = WindowsEditions.FirstOrDefault(p => p.Name == WindowsSetup.Edition) ?? WindowsEditions[0];
+            PromptBeforeInstallCheckBox.IsChecked = WindowsSetup.PromptBeforeInstall;
+            RequireEmptyDiskCheckBox.IsChecked = WindowsSetup.RequireEmptyDisk200Gb;
+            OobeLanguagePicker.SelectedItem = OobeLanguages.FirstOrDefault(p => p.Code == WindowsSetup.OobeLanguage) ?? OobeLanguages[0];
+            OobeKeyboardPicker.SelectedItem = OobeKeyboards.FirstOrDefault(p => p.Code == WindowsSetup.OobeKeyboard) ?? OobeKeyboards[0];
+            _defaultsLocked = true;
+            SetDefaultsLocked();
+        }
+        _changingProfile = false;
+        _loadedProfileState = CurrentProfileState();
+    }
+
+    private void RemoveProfile_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedProfile is null) return;
+        if (ThemedMessageDialog.Show(this, $"Remove profile '{_selectedProfile.Name}'?\n\nThis also discards its current edits. Cancel at the bottom of Configuration can undo the removal.",
+                "Remove profile", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No) != MessageBoxResult.Yes) return;
+        _changingProfile = true;
+        _profiles.Remove(_selectedProfile);
+        LoadProfile(_profiles.FirstOrDefault());
     }
 
     private async Task RefreshCacheSizeAsync()
@@ -356,12 +480,13 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
     private void SetDefaultsLocked()
     {
         PartitionGrid.IsReadOnly = _defaultsLocked;
+        DefaultPartitionArea.Opacity = _defaultsLocked ? 0.52 : 1;
         GeneratedSetupPanel.IsEnabled = !_defaultsLocked;
         GeneratedSetupPanel.Opacity = _defaultsLocked ? 0.52 : 1;
         GeneratedSetupOptionsPanel.IsEnabled = !_defaultsLocked;
         GeneratedSetupOptionsPanel.Opacity = _defaultsLocked ? 0.52 : 1;
         DefaultsLockButton.Content = _defaultsLocked ? "\uE72E" : "\uE785";
-        DefaultsLockButton.ToolTip = _defaultsLocked ? "Unlock default partition editing" : "Lock default partition editing";
+        DefaultsLockButton.ToolTip = _defaultsLocked ? "Unlock profile partition and setup editing" : "Lock profile partition and setup editing";
         DefaultsLockButton.SetResourceReference(System.Windows.Controls.Control.BackgroundProperty,
             _defaultsLocked ? "AddButtonBackground" : "ClearButtonBackground");
         DefaultsLockButton.SetResourceReference(System.Windows.Controls.Control.ForegroundProperty,
@@ -373,13 +498,8 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
 
     private void Save_Click(object sender, RoutedEventArgs e)
     {
-        PartitionGrid.CommitEdit(DataGridEditingUnit.Cell, true);
-        PartitionGrid.CommitEdit(DataGridEditingUnit.Row, true);
-        if (!Validate(out var message))
-        {
-            MessageBox.Show(message, "Invalid partition settings", MessageBoxButton.OK, MessageBoxImage.Warning);
-            return;
-        }
+        if (!ValidateEditor()) return;
+        if (_selectedProfile is not null && !SaveProfile(false)) return;
         Result = _items.Select(p => p.Clone()).ToList();
         SelectedLanguage = (LanguagePicker.SelectedItem as LanguageOption)?.Code ?? "en-US";
         SelectedTheme = (ThemePicker.SelectedItem as ThemeOption)?.Key ?? "Light";
@@ -389,9 +509,42 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
         DialogResult = true;
     }
 
+    private bool ValidateEditor()
+    {
+        PartitionGrid.CommitEdit(DataGridEditingUnit.Cell, true);
+        PartitionGrid.CommitEdit(DataGridEditingUnit.Row, true);
+        if (!Validate(out var message))
+        {
+            ThemedMessageDialog.Show(this, message, "Invalid configuration", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+        return ValidateSetupEditor();
+    }
+
+    private bool ValidateSetupEditor()
+    {
+        try
+        {
+            foreach (var (label, text, minimum) in new[]
+            {
+                ("Target disk", TargetDiskTextBox.Text, 0), ("Install partition", InstallPartitionTextBox.Text, 1),
+                ("EFI MB", EfiSizeTextBox.Text, 1), ("MSR MB", MsrSizeTextBox.Text, 1), ("Shrink MB", WindowsShrinkTextBox.Text, 1)
+            })
+                if (!int.TryParse(text, out var number) || number < minimum)
+                    throw new InvalidOperationException($"{label} must be a whole number of {minimum} or greater.");
+            MainWindow.ValidateGeneratedWindowsSetup(ReadWindowsSetup());
+            return true;
+        }
+        catch (InvalidOperationException ex)
+        {
+            ThemedMessageDialog.Show(this, ex.Message, "Invalid Windows Setup settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+    }
+
     private WindowsSetupConfig ReadWindowsSetup() => new()
     {
-        TargetDisk = ParseInt(TargetDiskTextBox.Text, WindowsSetup.TargetDisk),
+        TargetDisk = int.TryParse(TargetDiskTextBox.Text, out var disk) && disk >= 0 ? disk : WindowsSetup.TargetDisk,
         InstallPartition = ParseInt(InstallPartitionTextBox.Text, WindowsSetup.InstallPartition),
         EfiSizeMb = ParseInt(EfiSizeTextBox.Text, WindowsSetup.EfiSizeMb),
         MsrSizeMb = ParseInt(MsrSizeTextBox.Text, WindowsSetup.MsrSizeMb),
@@ -400,12 +553,14 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
         EfiLetter = EfiLetterTextBox.Text.Trim(), WindowsLetter = WindowsLetterTextBox.Text.Trim(), RecoveryLetter = RecoveryLetterTextBox.Text.Trim(),
         Edition = (EditionPicker.SelectedItem as WindowsEditionOption)?.Name ?? WindowsEditions[0].Name,
         PromptBeforeInstall = PromptBeforeInstallCheckBox.IsChecked == true,
+        RequireEmptyDisk200Gb = RequireEmptyDiskCheckBox.IsChecked == true,
         OobeLanguage = (OobeLanguagePicker.SelectedItem as OobeLanguageOption)?.Code ?? OobeLanguages[0].Code,
         OobeKeyboard = (OobeKeyboardPicker.SelectedItem as OobeKeyboardOption)?.Code ?? OobeKeyboards[0].Code
     };
 
     private void GenerateAutounattend_Click(object sender, RoutedEventArgs e)
     {
+        if (!ValidateSetupEditor()) return;
         var dialog = new SaveFileDialog
         {
             Title = "Save generated Autounattend.xml",
@@ -433,7 +588,7 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
     private bool Validate(out string message)
     {
         message = "";
-        if (_items.Count is < 1 or > 4) { message = "Choose between 1 and 4 default partitions for an MBR USB."; return false; }
+        if (_items.Count is < 1 or > 4) { message = "Choose between 1 and 4 profile partitions for an MBR USB."; return false; }
         if (_items.Count(p => p.IsRemaining) != 1)
         { message = "Exactly one partition must use * for remaining space."; return false; }
         if (_items.Select(p => p.Name.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count() != _items.Count)
@@ -508,8 +663,8 @@ public partial class ConfigWindow : Window, INotifyPropertyChanged
     private void ApplyLanguage()
     {
         string T(string key) => Localization.Text(SelectedLanguage, key);
-        DialogTitleText.Text = "Configuration"; DialogSubtitleText.Text = "Configure default partitions and Windows image servicing.";
-        LanguageLabel.Text = T("Language"); ThemeLabel.Text = T("Theme"); DefaultPartitionsLabel.Text = "Default partitions";
+        DialogTitleText.Text = "Configuration"; DialogSubtitleText.Text = "Save and select named build profiles.";
+        LanguageLabel.Text = T("Language"); ThemeLabel.Text = T("Theme"); DefaultPartitionsLabel.Text = "Profile partitions";
         RemainingHint.Text = T("Size Help") + "  Label limits: FAT32 11, exFAT 15, NTFS 32 characters.";
         VolumeLabelColumn.Header = T("Volume label"); SizeColumn.Header = T("Size Header"); FormatColumn.Header = T("Format");
         CancelButton.Content = T("Cancel"); SaveButton.Content = T("Save");
@@ -531,6 +686,8 @@ public sealed class WindowsSetupConfig
     public string RecoveryLetter { get; set; } = "R";
     public string Edition { get; set; } = "Windows 11 Pro";
     public bool PromptBeforeInstall { get; set; } = true;
+    // Retain the serialized name so saved profiles remain compatible. Partition count is no longer checked.
+    public bool RequireEmptyDisk200Gb { get; set; }
     public string OobeLanguage { get; set; } = "en-US";
     public string OobeKeyboard { get; set; } = "0409:00000409";
     public WindowsSetupConfig Clone() => (WindowsSetupConfig)MemberwiseClone();
@@ -576,6 +733,8 @@ public sealed class PartitionConfig
     [JsonIgnore]
     public string? IsoSource { get; set; }
     [JsonIgnore]
+    public string? WindowsMediaFolder { get; set; }
+    [JsonIgnore]
     public int? IsoEditionIndex { get; set; }
     [JsonIgnore]
     public string? IsoEditionName { get; set; }
@@ -604,6 +763,9 @@ public sealed class PartitionConfig
     public string? FolderXmlSource => SourceFolders.Select(FindRootXmlFile).FirstOrDefault(path => path is not null);
     public bool HasAutounattend => GenerateAutounattend || !string.IsNullOrWhiteSpace(AutounattendSource) || FolderXmlSource is not null;
     public bool HasIso => !string.IsNullOrWhiteSpace(IsoSource);
+    public bool HasWindowsMedia => HasIso || !string.IsNullOrWhiteSpace(WindowsMediaFolder);
+    public IEnumerable<string> AdditionalSourceFolders => SourceFolders.Where(path =>
+        !path.Equals(WindowsMediaFolder, StringComparison.OrdinalIgnoreCase));
     public bool HasScripts => ScriptFiles.Count > 0;
     public bool HasDrivers => DriverFolders.Count + DriverFiles.Count + DriverArchives.Count > 0;
     public bool HasAnyContent => SourceFiles.Count + SourceFolders.Count + ScriptFiles.Count > 0 ||
@@ -615,6 +777,7 @@ public sealed class PartitionConfig
             var labels = new List<string>();
             if (HasAutounattend) labels.Add("AUXML");
             if (HasIso) labels.Add("ISO");
+            if (!string.IsNullOrWhiteSpace(WindowsMediaFolder)) labels.Add("Windows folder");
             if (SourceFolders.Count > 0) labels.Add("Folder");
             if (SourceFiles.Count > 0) labels.Add("Files");
             if (HasDrivers) labels.Add("Drivers");
@@ -623,7 +786,7 @@ public sealed class PartitionConfig
         }
     }
     public string AutounattendToolTip => GenerateAutounattend
-        ? "A new Autounattend.xml will be generated from the Windows Setup defaults in Config."
+        ? "A new Autounattend.xml will be generated from the selected Config profile's Windows Setup settings."
         : !string.IsNullOrWhiteSpace(AutounattendSource)
         ? $"Autounattend.xml selected:\n{AutounattendSource}"
         : FolderXmlSource is not null
@@ -641,7 +804,7 @@ public sealed class PartitionConfig
             SourceFiles.Select(path => $"File: {path}")
                 .Concat(SourceFolders.Select(path => $"Folder: {path}"))
                 .Concat(ScriptFiles.Select(path => $"Setup script/support file: {path}"))
-                .Concat(GenerateAutounattend ? ["Autounattend.xml: generated from Config defaults"] : [])
+                .Concat(GenerateAutounattend ? ["Autounattend.xml: generated from the selected Config profile"] : [])
                 .Concat(string.IsNullOrWhiteSpace(AutounattendSource) ? [] : [$"Autounattend.xml: {AutounattendSource}"])
                 .Concat(string.IsNullOrWhiteSpace(IsoSource) ? [] : [$"ISO: {IsoSource}"])
                 .Concat(string.IsNullOrWhiteSpace(IsoEditionName) ? [] : [$"Windows edition: {IsoEditionName}"])
@@ -657,6 +820,7 @@ public sealed class PartitionConfig
         clone.AutounattendSource = AutounattendSource;
         clone.GenerateAutounattend = GenerateAutounattend;
         clone.IsoSource = IsoSource;
+        clone.WindowsMediaFolder = WindowsMediaFolder;
         clone.IsoEditionIndex = IsoEditionIndex;
         clone.IsoEditionName = IsoEditionName;
         foreach (var path in DriverFolders) clone.DriverFolders.Add(path);
@@ -669,6 +833,7 @@ public sealed class PartitionConfig
     public void ClearIsoSelection()
     {
         IsoSource = null;
+        WindowsMediaFolder = null;
         IsoEditionIndex = null;
         IsoEditionName = null;
         DriverFolders.Clear();

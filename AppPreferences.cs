@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.IO;
+using System.Diagnostics.CodeAnalysis;
 
 namespace LaptopQaUsbBuilder;
 
@@ -10,6 +11,46 @@ public sealed class AppPreferences
     public bool ForceUnsignedDrivers { get; set; }
     public string ImageCompression { get; set; } = WindowsImageCompression.Esd;
     public WindowsSetupConfig WindowsSetup { get; set; } = new();
+    // Null distinguishes legacy preferences from an intentionally empty profile list.
+    public List<ConfigurationProfile>? Profiles { get; set; }
+    public string? SelectedProfileId { get; set; }
+
+    [MemberNotNull(nameof(Profiles))]
+    public void MigrateLegacyProfile(IEnumerable<PartitionConfig> partitions)
+    {
+        if (Profiles is not null) return;
+        var migrated = new ConfigurationProfile
+        {
+            Name = "My configuration", Partitions = partitions.ToList(),
+            ForceUnsignedDrivers = ForceUnsignedDrivers, ImageCompression = ImageCompression,
+            WindowsSetup = WindowsSetup
+        }.Clone();
+        Profiles = [migrated];
+        SelectedProfileId = migrated.Id;
+    }
+}
+
+public sealed class ConfigurationProfile
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string Name { get; set; } = "My configuration";
+    public List<PartitionConfig> Partitions { get; set; } = [];
+    public bool ForceUnsignedDrivers { get; set; }
+    public string ImageCompression { get; set; } = WindowsImageCompression.Esd;
+    public WindowsSetupConfig WindowsSetup { get; set; } = new();
+
+    public ConfigurationProfile Clone() => new()
+    {
+        Id = Id, Name = Name,
+        Partitions = Partitions.Select(p => new PartitionConfig
+        {
+            Number = p.Number, Name = p.Name, SizeText = p.SizeText, FileSystem = p.FileSystem
+        }).ToList(),
+        ForceUnsignedDrivers = ForceUnsignedDrivers, ImageCompression = ImageCompression,
+        WindowsSetup = WindowsSetup.Clone()
+    };
+
+    public override string ToString() => Name;
 }
 
 public static class WindowsImageCompression

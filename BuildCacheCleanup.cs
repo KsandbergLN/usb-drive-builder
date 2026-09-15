@@ -45,6 +45,8 @@ internal static class BuildCacheCleanup
 
     internal static bool IsCleanupRequested => File.Exists(RequestPath);
 
+    internal static void CancelCleanupRequest() => File.Delete(RequestPath);
+
     internal static long ClearBestEffort()
     {
         foreach (var path in Paths) DeleteTreeBestEffort(path);
@@ -74,6 +76,7 @@ internal static class BuildCacheCleanup
         var script = $"$current=Get-Process -Id {processId} -ErrorAction SilentlyContinue;if($current){{$current|Wait-Process -ErrorAction SilentlyContinue}};" +
                      "$limit=(Get-Date).AddHours(2);while((Get-Process -ErrorAction SilentlyContinue|Where-Object ProcessName -like 'USB Drive Builder v*') -and (Get-Date) -lt $limit){Start-Sleep -Seconds 2};" +
                      "if(Get-Process -ErrorAction SilentlyContinue|Where-Object ProcessName -like 'USB Drive Builder v*'){exit};" +
+                     $"if(-not (Test-Path -LiteralPath '{request}')){{exit}};" +
                      $"$paths=@({quotedPaths});foreach($path in $paths){{for($i=0;$i -lt 20 -and (Test-Path -LiteralPath $path);$i++){{Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue;Start-Sleep -Milliseconds 500}}}};" +
                      $"if(-not ($paths|Where-Object{{Test-Path -LiteralPath $_}})){{Remove-Item -LiteralPath '{request}' -Force -ErrorAction SilentlyContinue}}";
         var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));

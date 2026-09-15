@@ -7,18 +7,19 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\app-icon.ico</ApplicationIcon>
-    <AppVersion>2.0.106</AppVersion>
+    <AppVersion>2.0.110</AppVersion>
     <AssemblyName>USB Drive Builder v$(AppVersion)</AssemblyName>
     <RootNamespace>LaptopQaUsbBuilder</RootNamespace>
     <Version>$(AppVersion)</Version>
-    <AssemblyVersion>2.0.106.0</AssemblyVersion>
-    <FileVersion>2.0.106.0</FileVersion>
+    <AssemblyVersion>2.0.110.0</AssemblyVersion>
+    <FileVersion>2.0.110.0</FileVersion>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>false</SelfContained>
     <DebugType>embedded</DebugType>
     <PathMap>$(MSBuildProjectDirectory)=/_/LaptopQaUsbBuilder</PathMap>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
     <Resource Include="Assets\app-icon.ico" />
   </ItemGroup>
 </Project>

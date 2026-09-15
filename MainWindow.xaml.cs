@@ -68,13 +68,12 @@ public partial class MainWindow : Window
     private double _sharedPreparationStageStart;
     private double _sharedPreparationStageEnd;
     private double _queuePreparationShare;
-    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.106"}";
+    private static readonly string VersionLabel = $"v{Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "2.0.110"}";
     private const string MainPartitionDragFormat = "LaptopQaUsbBuilder.MainPartition";
     private const string ScriptRunnerName = "LaptopQA-RunScripts.cmd";
     private const string ScriptCleanupName = "LaptopQA-Cleanup.ps1";
     internal const string CacheCleanupGuardName = "LaptopQAUsbBuilder.CacheCleanupGuard";
     private Semaphore? _cacheCleanupGuard;
-    private bool _preservePreparedMediaForRetry;
 
     public MainWindow()
     {
@@ -86,6 +85,7 @@ public partial class MainWindow : Window
         _preferences = LoadPreferences();
         Localization.ApplyCulture(_preferences.Language);
         _defaultPartitions = LoadPartitionConfig();
+        InitializeProfiles();
         _partitions = _defaultPartitions.Select(p => p.Clone()).ToList();
         MainPartitionList.ItemsSource = _partitions;
         ApplyPartitionConfig();
@@ -105,7 +105,7 @@ public partial class MainWindow : Window
         {
             if (!_isBuilding && !_isPreflighting)
             {
-                CleanupTemporaryCaches(_preservePreparedMediaForRetry);
+                CleanupTemporaryCaches();
                 if (BuildCacheCleanup.IsCleanupRequested)
                     BuildCacheCleanup.StartCleanupAfterExit(Environment.ProcessId);
                 return;
@@ -116,7 +116,7 @@ public partial class MainWindow : Window
         };
     }
 
-    private static void CleanupTemporaryCaches(bool preservePreparedMediaForRetry)
+    private static void CleanupTemporaryCaches()
     {
         Semaphore? guard = null;
         var ownsGuard = false;
@@ -143,7 +143,7 @@ public partial class MainWindow : Window
         try
         {
             BuildCacheCleanup.ClearStagingBestEffort();
-            if (BuildCacheCleanup.IsCleanupRequested || !preservePreparedMediaForRetry)
+            if (BuildCacheCleanup.IsCleanupRequested)
                 BuildCacheCleanup.ClearBestEffort();
             BuildCacheCleanup.CompleteRequestIfEmpty();
         }
@@ -262,7 +262,7 @@ public partial class MainWindow : Window
         var queuedDisks = SelectedDisks();
         if (queuedDisks.Count == 0) return;
         InitializeQueueDriveProgress(queuedDisks);
-        BeginSharedPreparation(_partitions.Any(partition => partition.HasIso) ? 55 : 5);
+        BeginSharedPreparation(_partitions.Any(partition => partition.HasWindowsMedia) ? 55 : 5);
         SetSharedPreparationStage(0, 2);
         if (!ValidatePartitionLayout(out var layoutError))
         {
@@ -372,7 +372,7 @@ public partial class MainWindow : Window
         cancellationToken.ThrowIfCancellationRequested();
         SetSharedPreparationProgress(11);
 
-        foreach (var partition in _partitions.Where(p => p.HasIso))
+        foreach (var partition in _partitions.Where(p => p.HasWindowsMedia))
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (partition.FileSystem != "NTFS" || partition.IsRemaining || !PartitionConfig.TryParseSize(partition.SizeText, out var partitionBytes))
@@ -386,12 +386,14 @@ public partial class MainWindow : Window
                 SetStatus("Preparing Windows media", "#B36A13");
                 SetSharedPreparationStage(11, 14);
                 BuildProgress.Value = 0;
-                var isoInfo = await InspectBootableIsoAsync(partition.IsoSource!);
+                var isoInfo = !string.IsNullOrWhiteSpace(partition.WindowsMediaFolder)
+                    ? await InspectMountedWindowsIsoAsync(partition.WindowsMediaFolder)
+                    : await InspectBootableIsoAsync(partition.IsoSource!);
                 SetSharedPreparationProgress(14);
                 BuildProgress.Value = 25;
                 if (partition.IsoEditionIndex is not { } editionIndex ||
                     isoInfo.Editions.FirstOrDefault(item => item.Index == editionIndex) is not { } edition)
-                    throw new InvalidOperationException("The selected Windows edition is no longer present in this ISO. Select the ISO again and choose an edition.");
+                    throw new InvalidOperationException("The selected Windows edition is no longer present in this installer. Select the ISO or installer folder again and choose an edition.");
                 if (partition.HasDrivers)
                 {
                     foreach (var folder in partition.DriverFolders)
@@ -422,7 +424,7 @@ public partial class MainWindow : Window
                     },
                     Log, MountIsoAsync, DismountIsoAsync,
                     _buildCancellation?.Token ?? CancellationToken.None);
-                var prepared = await preparer.PrepareAsync(partition.IsoSource!, isoInfo, selection);
+                var prepared = await preparer.PrepareAsync(partition.WindowsMediaFolder ?? partition.IsoSource!, isoInfo, selection);
                 partition.PreparedMediaPath = prepared.MediaPath;
                 partition.ExtractedIsoBytes = prepared.TotalBytes;
                 BuildProgress.Value = 100;
@@ -539,17 +541,55 @@ public partial class MainWindow : Window
         RenderQueueDriveProgress();
         CompleteEtaTracking();
         SetBuildProgressFinished(failures.Count == 0);
-        SetBuildingState(false);
+        CancelBuildButton.IsEnabled = false;
         ConfirmText.Clear();
-        _preservePreparedMediaForRetry = failures.Count > 0 && _partitions.Any(partition =>
-            partition.HasIso && !string.IsNullOrWhiteSpace(partition.PreparedMediaPath) &&
-            Directory.Exists(partition.PreparedMediaPath));
-        if (_preservePreparedMediaForRetry)
-            AddActivity("Prepared Windows media and its supporting driver caches will be retained after close for the next retry.");
         SetStatus(failures.Count == 0 ? "✓ Complete" : "✕ Queue finished with errors", failures.Count == 0 ? "#147A4B" : "#AE3338");
         var failureText = failures.Count == 0 ? "" : $"\n\nFailures:\n{string.Join("\n", failures)}";
-        MessageBox.Show($"Queue finished.\n\nSucceeded: {succeeded}\nFailed: {failures.Count}{failureText}\n\nLog: {_logPath}",
-            "USB queue complete", MessageBoxButton.OK, failures.Count == 0 ? MessageBoxImage.Information : MessageBoxImage.Warning);
+        await OfferBuildCacheCleanupAsync($"Queue finished.\n\nSucceeded: {succeeded}\nFailed: {failures.Count}{failureText}\n\nLog: {_logPath}", failures.Count > 0);
+    }
+
+    private async Task OfferBuildCacheCleanupAsync(string summary, bool hadFailures)
+    {
+        // All queued disks are finished. The build still owns the cache guard until
+        // Build_Click's finally block, so no other build can use the cache while clearing.
+        try
+        {
+            var size = await Task.Run(BuildCacheCleanup.GetSize);
+            if (size == 0)
+            {
+                ThemedMessageDialog.Show(this, summary, "USB queue complete", MessageBoxButton.OK,
+                    hadFailures ? MessageBoxImage.Warning : MessageBoxImage.Information);
+                return;
+            }
+            var choice = ThemedMessageDialog.Show(this,
+                summary + $"\n\nBuild cache: {FormatBytes(size)}.\n\nKeeping the cache makes the next matching build faster. Clearing it frees disk space but requires preparing Windows media and drivers again.\n\nUSB contents, source files, logs, and saved profiles are kept.",
+                "USB queue complete", MessageBoxButton.YesNo,
+                hadFailures ? MessageBoxImage.Warning : MessageBoxImage.Information,
+                MessageBoxResult.No, yesButtonText: "Clear cache", noButtonText: "Keep cache");
+            if (choice != MessageBoxResult.Yes)
+            {
+                BuildCacheCleanup.CancelCleanupRequest();
+                AddActivity("Build cache kept for faster future builds, including after the app closes.");
+                return;
+            }
+            BuildCacheCleanup.RequestCleanupOnExit();
+            SetNonTransferActivity("Clearing build cache...");
+            var remaining = await Task.Run(BuildCacheCleanup.ClearBestEffort);
+            BuildCacheCleanup.CompleteRequestIfEmpty();
+            foreach (var partition in _partitions) partition.PreparedMediaPath = null;
+            var message = remaining == 0
+                ? "Build cache cleared. The next Windows media build will prepare a fresh copy."
+                : $"Available cache cleared. {FormatBytes(remaining)} is still locked and is scheduled for cleanup after the app closes.";
+            AddActivity(message);
+            SetNonTransferActivity("USB queue finished");
+            ThemedMessageDialog.Show(this, message, "Cache cleanup", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            AddActivity($"USB queue finished, but cache cleanup could not complete: {ex.Message}");
+            ThemedMessageDialog.Show(this, $"The USB queue has finished, but the cache action could not complete.\n\n{ex.Message}\n\nYou can retry Clear Cache from Config.",
+                "Cache cleanup unavailable", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
     private async Task<PartitionResult> CreatePartitionsAsync(UsbDisk disk)
@@ -666,10 +706,10 @@ public partial class MainWindow : Window
 
     private async Task CopyPartitionSourcesAsync(PartitionConfig partition, string destination, int startProgress, int endProgress)
     {
-        var sources = partition.SourceFolders.Select(path => (Path: path, IsFolder: true, TargetName: (string?)null))
+        var sources = partition.AdditionalSourceFolders.Select(path => (Path: path, IsFolder: true, TargetName: (string?)null))
             .Concat(partition.SourceFiles.Select(path => (Path: path, IsFolder: false, TargetName: (string?)Path.GetFileName(path))))
             .ToList();
-        var hasIso = partition.FileSystem == "NTFS" && !string.IsNullOrWhiteSpace(partition.IsoSource);
+        var hasIso = partition.FileSystem == "NTFS" && partition.HasWindowsMedia;
         var hasAutounattend = (partition.FileSystem == "NTFS" || hasIso) &&
                               (!string.IsNullOrWhiteSpace(partition.AutounattendSource) ||
                                !string.IsNullOrWhiteSpace(partition.PreparedAutounattendXml));
@@ -927,7 +967,26 @@ public partial class MainWindow : Window
             var redirect = index == 0 ? ">" : ">>";
             AddRunSynchronousCommand(commands, unattend, wcm, ref order, "Write GPT partition script", $"cmd.exe /c echo {diskpartLines[index]} {redirect} X:\\diskpart.txt");
         }
-        AddRunSynchronousCommand(commands, unattend, wcm, ref order, "Run DiskPart", "cmd.exe /c diskpart.exe /s X:\\diskpart.txt > X:\\diskpart.log 2>&1");
+        if (setup.RequireEmptyDisk200Gb)
+        {
+            AddScript("check-target-disk.vbs", WindowsSetupDiskGuard.ScriptLines(), "Write target disk check");
+            AddScript("partition-checked.cmd", WindowsSetupDiskGuard.PartitionRunnerLines, "Write guarded partition runner");
+            AddRunSynchronousCommand(commands, unattend, wcm, ref order, "Validate target disk and run DiskPart", "cmd.exe /c X:\\partition-checked.cmd");
+        }
+        else
+        {
+            AddRunSynchronousCommand(commands, unattend, wcm, ref order, "Run DiskPart", "cmd.exe /c diskpart.exe /s X:\\diskpart.txt > X:\\diskpart.log 2>&1");
+        }
+
+        void AddScript(string name, string[] lines, string description)
+        {
+            for (var index = 0; index < lines.Length; index++)
+            {
+                var redirect = index == 0 ? ">" : ">>";
+                AddRunSynchronousCommand(commands, unattend, wcm, ref order, description,
+                    $"cmd.exe /c echo {EscapeCommandEcho(lines[index])} {redirect} X:\\{name}");
+            }
+        }
         component.Add(commands);
         settings.Add(component);
         root.AddFirst(settings);
@@ -964,8 +1023,14 @@ public partial class MainWindow : Window
         .Replace("(", "^(")
         .Replace(")", "^)");
 
-    private static void ValidateGeneratedWindowsSetup(WindowsSetupConfig setup)
+    internal static void ValidateGeneratedWindowsSetup(WindowsSetupConfig setup)
     {
+        if (setup.TargetDisk < 0) throw new InvalidOperationException("Target disk must be zero or greater.");
+        if (setup.RequireEmptyDisk200Gb && setup.TargetDisk != 0)
+            throw new InvalidOperationException("The disk check requires Target disk 0. Set Target disk to 0 or turn off the disk check.");
+        if (setup.InstallPartition != 3) throw new InvalidOperationException("Install partition must be 3 for the generated EFI / MSR / Windows / Recovery layout.");
+        if (setup.EfiSizeMb <= 0 || setup.MsrSizeMb <= 0 || setup.WindowsShrinkMb <= 0)
+            throw new InvalidOperationException("EFI, MSR, and shrink sizes must be positive whole numbers.");
         ValidateDiskpartLabel(setup.EfiLabel, "EFI label");
         ValidateDiskpartLabel(setup.WindowsLabel, "Windows label");
         ValidateDiskpartLabel(setup.RecoveryLabel, "Recovery label");
@@ -1092,14 +1157,16 @@ public partial class MainWindow : Window
         var installWim = Path.Combine(root, "sources", "install.wim");
         var installEsd = Path.Combine(root, "sources", "install.esd");
         if (!File.Exists(bootFile) || !File.Exists(bootWim) || !File.Exists(bootManager) || !File.Exists(biosBcd) || !File.Exists(uefiBcd))
-            throw new InvalidOperationException("This is not a complete supported 64-bit Windows installer ISO. One or more required Windows Setup boot files are missing.");
+            throw new InvalidOperationException("This is not a complete supported 64-bit Windows installer. One or more required Windows Setup boot files are missing.");
         if (!File.Exists(installWim) && !File.Exists(installEsd))
             throw new InvalidOperationException("Windows Setup image sources\\install.wim or sources\\install.esd was not found.");
 
         var installImage = File.Exists(installWim) ? installWim : installEsd;
         var editions = await GetWindowsImageEditionsAsync(installImage);
-        if (editions.Count == 0) throw new InvalidOperationException("Windows Setup did not report any installable editions in the selected ISO.");
-        return new BootableIsoInfo(CalculateDirectoryBytes(root), Path.GetFileName(installImage), editions);
+        if (editions.Count == 0) throw new InvalidOperationException("Windows Setup did not report any installable editions in the selected installer.");
+        var totalBytes = await Task.Run(() => WindowsMediaFolderSource.EnumerateFiles(root, _buildCancellation?.Token ?? CancellationToken.None)
+            .Sum(file => new FileInfo(file).Length));
+        return new BootableIsoInfo(totalBytes, Path.GetFileName(installImage), editions);
     }
 
     private async Task<List<WindowsImageEdition>> GetWindowsImageEditionsAsync(string imagePath)
@@ -1302,7 +1369,7 @@ public partial class MainWindow : Window
                         name.Equals("$RECYCLE.BIN", StringComparison.OrdinalIgnoreCase)) continue;
                     try
                     {
-                        if ((File.GetAttributes(folder) & FileAttributes.ReparsePoint) == 0) directories.Push(folder);
+                        if (!WindowsMediaFolderSource.IsDirectoryLink(folder)) directories.Push(folder);
                     }
                     catch (IOException) { }
                     catch (UnauthorizedAccessException) { }
@@ -1319,7 +1386,7 @@ public partial class MainWindow : Window
     {
         long total = 0;
         long largest = 0;
-        foreach (var folder in partition.SourceFolders.Distinct(StringComparer.OrdinalIgnoreCase))
+        foreach (var folder in partition.AdditionalSourceFolders.Distinct(StringComparer.OrdinalIgnoreCase))
         {
             cancellationToken.ThrowIfCancellationRequested();
             var stats = CalculateDirectoryStats(folder, cancellationToken: cancellationToken);
@@ -1382,7 +1449,7 @@ public partial class MainWindow : Window
             (string.IsNullOrWhiteSpace(partition.IsoSource) ? 0 : GetFileLength(partition.IsoSource));
         var contentBytes = SaturatingAdd(partition.SelectedContentBytes, isoBytes);
         if (contentBytes == 0) return 0;
-        var reserve = partition.HasIso
+        var reserve = partition.HasWindowsMedia
             ? 256L * 1024 * 1024
             : Math.Clamp(contentBytes / 100, 1L * 1024 * 1024, 256L * 1024 * 1024);
         return SaturatingAdd(contentBytes, reserve);
@@ -2009,7 +2076,7 @@ public partial class MainWindow : Window
         string T(string key) => Localization.Text(_preferences.Language, key);
         SubtitleText.Text = T("Subtitle"); SelectDriveTitle.Text = $"1. {T("Select USB Drive")}";
         RefreshButton.Content = T("Refresh");
-        PartitionEditorTitle.Text = T("Partition Settings"); MainDefaultsButton.Content = "Defaults"; PartitionLayoutTitle.Text = T("Partition Layout"); PartitionLayoutNote.Text = T("GPT Note").Replace("GPT", "MBR");
+        PartitionEditorTitle.Text = T("Partition Settings"); MainDefaultsButton.Content = "Apply profile"; PartitionLayoutTitle.Text = T("Partition Layout"); PartitionLayoutNote.Text = T("GPT Note").Replace("GPT", "MBR");
         WarningText.Text = T("Warning"); ActivityTitle.Text = T("Activity"); ConfirmLabel.Text = T("Confirm ERASE"); BuildButton.Content = T("Build USB Queue");
         if (!_isBuilding) HeaderStatus.Text = T("Ready");
     }
@@ -2038,6 +2105,19 @@ public partial class MainWindow : Window
     {
         Directory.CreateDirectory(Path.GetDirectoryName(PreferencesPath)!);
         File.WriteAllText(PreferencesPath, JsonSerializer.Serialize(_preferences, new JsonSerializerOptions { WriteIndented = true }));
+    }
+
+    private void InitializeProfiles()
+    {
+        _preferences.MigrateLegacyProfile(_defaultPartitions);
+        var selected = _preferences.Profiles!.FirstOrDefault(p => p.Id == _preferences.SelectedProfileId)
+            ?? _preferences.Profiles.FirstOrDefault();
+        _preferences.SelectedProfileId = selected?.Id;
+        if (selected is null) return;
+        _defaultPartitions = selected.Clone().Partitions;
+        _preferences.WindowsSetup = selected.WindowsSetup.Clone();
+        _preferences.ForceUnsignedDrivers = selected.ForceUnsignedDrivers;
+        _preferences.ImageCompression = WindowsImageCompression.Normalize(selected.ImageCompression);
     }
 
     private List<PartitionConfig> LoadPartitionConfig()
@@ -2074,6 +2154,7 @@ public partial class MainWindow : Window
     {
         message = "";
         if (_partitions.Count is < 1 or > 4) { message = "Choose between 1 and 4 partitions for an MBR USB."; return false; }
+        if (_partitions.Count(p => p.HasWindowsMedia) > 1) { message = "Only one Windows installer partition is supported per USB."; return false; }
         if (_partitions.Count(p => p.IsRemaining) != 1) { message = "Exactly one partition must use * for remaining space."; return false; }
         if (_partitions.Select(p => p.Name.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count() != _partitions.Count)
         { message = "Every volume label must be unique."; return false; }
@@ -2086,13 +2167,14 @@ public partial class MainWindow : Window
             if (!PartitionConfig.AllowedFormats.Contains(item.FileSystem)) { message = $"Partition {item.Number} has an unsupported format."; return false; }
             var maxLength = item.FileSystem == "FAT32" ? 11 : item.FileSystem == "exFAT" ? 15 : 32;
             if (item.Name.Length > maxLength) { message = $"{item.FileSystem} label '{item.Name}' exceeds {maxLength} characters."; return false; }
-            if (item.HasIso && (item.FileSystem != "NTFS" || item.IsRemaining)) { message = $"Partition {item.Number} must be a fixed-size NTFS partition for bootable Windows media."; return false; }
-            if ((item.HasDrivers || item.HasScripts) && !item.HasIso) { message = $"Partition {item.Number} has Drivers or Scripts selected. Add a Windows ISO to that partition, or clear those selections."; return false; }
+            if (item.HasWindowsMedia && (item.FileSystem != "NTFS" || item.IsRemaining)) { message = $"Partition {item.Number} must be a fixed-size NTFS partition for bootable Windows media."; return false; }
+            if ((item.HasDrivers || item.HasScripts) && !item.HasWindowsMedia) { message = $"Partition {item.Number} has Drivers or Scripts selected. Add a Windows ISO or a complete extracted Windows installer folder to that partition, or clear those selections."; return false; }
+            if (item.HasIso && !string.IsNullOrWhiteSpace(item.WindowsMediaFolder)) { message = "Choose either an ISO or an extracted installer folder, not both."; return false; }
             if (item.IsRemaining) continue;
             if (!PartitionConfig.TryParseSize(item.SizeText, out var bytes)) { message = $"Partition {item.Number} needs a size such as 50 MB or 20 GB, or * for remaining space."; return false; }
             if (bytes < 32L * 1024 * 1024) { message = $"Partition {item.Number} must be at least 32 MB."; return false; }
             if (item.FileSystem == "FAT32" && bytes > 32L * 1024 * 1024 * 1024) { message = $"Partition {item.Number} exceeds Windows' 32 GB FAT32 formatting limit."; return false; }
-            if (item.HasIso && bytes < 5L * 1024 * 1024 * 1024) { message = $"Bootable ISO partition {item.Number} must be at least 5 GB."; return false; }
+            if (item.HasWindowsMedia && bytes < 5L * 1024 * 1024 * 1024) { message = $"Windows installer partition {item.Number} must be at least 5 GB."; return false; }
         }
         return true;
     }
@@ -2128,7 +2210,7 @@ public partial class MainWindow : Window
         if ((sender as FrameworkElement)?.DataContext is PartitionConfig partition)
         {
             if (partition.FileSystem != "NTFS") partition.ClearIsoSelection();
-            if (partition.FileSystem != "NTFS" && !partition.HasIso) partition.AutounattendSource = null;
+            if (partition.FileSystem != "NTFS" && !partition.HasWindowsMedia) partition.AutounattendSource = null;
         }
         if (IsLoaded) QueuePartitionConfigurationChanged();
     }
@@ -2486,7 +2568,8 @@ public partial class MainWindow : Window
     {
         var originalLanguage = _preferences.Language;
         var dialog = new ConfigWindow(_defaultPartitions, _preferences.Language, _preferences.Theme,
-            _preferences.ForceUnsignedDrivers, _preferences.ImageCompression, _preferences.WindowsSetup) { Owner = this };
+            _preferences.ForceUnsignedDrivers, _preferences.ImageCompression, _preferences.WindowsSetup,
+            _preferences.Profiles, _preferences.SelectedProfileId) { Owner = this };
         if (dialog.ShowDialog() != true)
         {
             Localization.ApplyCulture(originalLanguage);
@@ -2498,12 +2581,22 @@ public partial class MainWindow : Window
         _preferences.ForceUnsignedDrivers = dialog.ForceUnsignedDrivers;
         _preferences.ImageCompression = dialog.SelectedImageCompression;
         _preferences.WindowsSetup = dialog.WindowsSetup;
+        _preferences.Profiles = dialog.Profiles;
+        _preferences.SelectedProfileId = dialog.SelectedProfileId;
         SaveDefaultPartitionConfig();
         SavePreferences();
+        ThemedMessageDialog.Show(this, "Configuration and profile changes saved successfully.",
+            "Configuration saved", MessageBoxButton.OK, MessageBoxImage.Information);
         Localization.ApplyCulture(_preferences.Language);
         ApplyLanguage();
         ThemeService.Apply(this, _preferences.Theme);
-        AddActivity($"Default partition layout updated: {_defaultPartitions.Count} partition(s).");
+        if (!_partitions.Any(p => p.HasAnyContent))
+        {
+            _partitions = _defaultPartitions.Select(p => p.Clone()).ToList();
+            MainPartitionList.ItemsSource = _partitions;
+            PartitionConfigurationChanged();
+        }
+        AddActivity($"Configuration saved: {dialog.Profiles.FirstOrDefault(p => p.Id == dialog.SelectedProfileId)?.Name ?? "Unsaved profile"}. Use Apply profile to reload its partition layout and clear current content selections.");
     }
     private void AddPartition_Click(object sender, RoutedEventArgs e)
     {
@@ -2521,11 +2614,11 @@ public partial class MainWindow : Window
     private void MainDefaults_Click(object sender, RoutedEventArgs e)
     {
         var hasSources = _partitions.Any(p => p.HasAnyContent);
-        if (hasSources && MessageBox.Show("Restore the configured default partitions and clear the current content selections?", "Restore defaults", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+        if (hasSources && MessageBox.Show("Apply the selected profile's partition layout and clear the current content selections?", "Apply profile", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
         _partitions = _defaultPartitions.Select(p => p.Clone()).ToList();
         MainPartitionList.ItemsSource = _partitions;
         PartitionConfigurationChanged();
-        AddActivity("Default partition layout restored.");
+        AddActivity("Profile partition layout applied.");
     }
 
     private void RemovePartition_Click(object sender, RoutedEventArgs e)
@@ -2572,17 +2665,91 @@ public partial class MainWindow : Window
     {
         var dialog = new ContentSourcesDialog(partition.Name, partition.SourceFiles, partition.SourceFolders, _preferences.Theme) { Owner = owner };
         if (dialog.ShowDialog() != true) return;
+        string? mediaFolder = null;
+        WindowsIsoEditionSelection? folderEdition = null;
+        BootableIsoInfo? folderInfo = null;
+        if (partition.FileSystem == "NTFS")
+        {
+            var installers = dialog.SourceFolders.Where(WindowsMediaFolderSource.IsInstaller)
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            if (installers.Length > 1 || (installers.Length > 0 && partition.HasIso))
+            {
+                ThemedMessageDialog.Show(owner, "Choose one Windows installer source: an ISO or one extracted installer folder. Remove the other installer source first.",
+                    "Multiple Windows installers", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            mediaFolder = installers.FirstOrDefault();
+            if (mediaFolder is not null)
+            {
+                if (_partitions.Any(p => !ReferenceEquals(p, partition) && p.HasWindowsMedia))
+                {
+                    ThemedMessageDialog.Show(owner, "Only one Windows installer partition is supported per USB. Remove the installer from the other partition first.",
+                        "Windows installer already selected", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+                if (partition.IsRemaining || !PartitionConfig.TryParseSize(partition.SizeText, out var capacity) || capacity < 5L * 1024 * 1024 * 1024)
+                {
+                    ThemedMessageDialog.Show(owner, "A Windows installer needs a fixed-size NTFS partition of at least 5 GB.",
+                        "Boot partition size", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+                if (!mediaFolder.Equals(partition.WindowsMediaFolder, StringComparison.OrdinalIgnoreCase) || partition.IsoEditionIndex is null)
+                {
+                    try
+                    {
+                        SetStatus("Inspecting Windows installer folder", "#B36A13");
+                        Cursor = Cursors.Wait;
+                        folderInfo = await InspectMountedWindowsIsoAsync(mediaFolder);
+                        Cursor = null;
+                        var options = new WindowsIsoOptionsDialog(mediaFolder, folderInfo.Editions, _preferences.Theme) { Owner = owner };
+                        if (options.ShowDialog() != true || options.Selection is not { } selection) return;
+                        folderEdition = selection;
+                    }
+                    catch (Exception ex)
+                    {
+                        ThemedMessageDialog.Show(owner, $"The Windows installer folder could not be inspected.\n\n{ex.Message}",
+                            "Installer inspection failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                        return;
+                    }
+                    finally
+                    {
+                        Cursor = null;
+                        SetStatus(Localization.Text(_preferences.Language, "Ready"), "#147A4B");
+                    }
+                }
+            }
+        }
+        if (!string.Equals(mediaFolder, partition.WindowsMediaFolder, StringComparison.OrdinalIgnoreCase))
+        {
+            partition.PreparedMediaPath = null;
+            partition.ExtractedIsoBytes = null;
+            if (!partition.HasIso)
+            {
+                partition.IsoEditionIndex = null;
+                partition.IsoEditionName = null;
+                if (mediaFolder is null) partition.GenerateAutounattend = false;
+            }
+        }
+        partition.WindowsMediaFolder = mediaFolder;
+        if (folderEdition is not null)
+        {
+            partition.IsoEditionIndex = folderEdition.EditionIndex;
+            partition.IsoEditionName = folderEdition.EditionName;
+            partition.ExtractedIsoBytes = folderInfo!.TotalBytes;
+        }
+        partition.PreparedAutounattendXml = null;
         partition.SourceFiles.Clear();
         foreach (var path in dialog.SourceFiles) partition.SourceFiles.Add(path);
         partition.SourceFolders.Clear();
         foreach (var path in dialog.SourceFolders) partition.SourceFolders.Add(path);
+        if (mediaFolder is not null) AddActivity($"Windows installer folder selected: {mediaFolder}. Scripts and driver injection are available.");
         await RefreshPartitionContentSizeAsync(partition, true);
         UpdateBuildButton();
     }
 
     private async Task AddPartitionAutounattendAsync(PartitionConfig partition, Window owner)
     {
-        if (partition.FileSystem != "NTFS" && !partition.HasIso) return;
+        if (partition.FileSystem != "NTFS" && !partition.HasWindowsMedia) return;
         var dialog = new OpenFileDialog { Title = $"Select Autounattend.xml for {partition.Name}", Filter = "XML files (*.xml)|*.xml|All files (*.*)|*.*", CheckFileExists = true, Multiselect = false, InitialDirectory = PickerLocationStore.Get("XML") };
         if (dialog.ShowDialog(owner) != true) return;
         PickerLocationStore.Set("XML", Path.GetDirectoryName(dialog.FileName));
@@ -2595,10 +2762,16 @@ public partial class MainWindow : Window
     private async Task AddPartitionIsoAsync(PartitionConfig partition, Window owner)
     {
         if (partition.FileSystem != "NTFS") return;
-        if (_partitions.Any(item => !ReferenceEquals(item, partition) && item.HasIso))
+        if (!string.IsNullOrWhiteSpace(partition.WindowsMediaFolder))
         {
-            MessageBox.Show("Only one bootable Windows ISO partition is supported on each USB drive. Clear the ISO from the other partition first.",
-                "Bootable ISO already selected", MessageBoxButton.OK, MessageBoxImage.Information);
+            ThemedMessageDialog.Show(owner, "Remove the Windows installer folder from Files / folders before selecting an ISO.",
+                "Windows installer folder selected", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        if (_partitions.Any(item => !ReferenceEquals(item, partition) && item.HasWindowsMedia))
+        {
+            MessageBox.Show("Only one Windows installer partition is supported on each USB drive. Clear the ISO or installer folder from the other partition first.",
+                "Windows installer already selected", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
         if (partition.IsRemaining)
