@@ -59,7 +59,7 @@ public partial class PartitionContentDialog : Window
         IsoExtrasSection.Visibility = isNtfs ? Visibility.Visible : Visibility.Collapsed;
         StandardButtons.Columns = isNtfs ? 3 : 1;
         Width = isNtfs ? 620 : 390;
-        GenerateAutounattendCheckBox.Visibility = isNtfs && _partition.HasIso ? Visibility.Visible : Visibility.Collapsed;
+        GenerateAutounattendCheckBox.Visibility = isNtfs && _partition.HasWindowsMedia ? Visibility.Visible : Visibility.Collapsed;
         GenerateAutounattendCheckBox.IsEnabled = string.IsNullOrWhiteSpace(_partition.AutounattendSource) && _partition.FolderXmlSource is null;
         GenerateAutounattendCheckBox.IsChecked = _partition.GenerateAutounattend;
         GenerateAutounattendCheckBox.ToolTip = GenerateAutounattendCheckBox.IsEnabled

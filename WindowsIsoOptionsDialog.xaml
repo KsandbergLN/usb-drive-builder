@@ -19,7 +19,7 @@
         <Grid Margin="26,20">
             <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
             <Grid MouseLeftButtonDown="TitleBar_MouseLeftButtonDown"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="42"/></Grid.ColumnDefinitions>
-                <StackPanel><TextBlock Text="Windows ISO Options" FontSize="27" FontWeight="Light"/><TextBlock x:Name="IsoNameText" Foreground="{DynamicResource ThemeMuted}" TextTrimming="CharacterEllipsis"/></StackPanel>
+                <StackPanel><TextBlock x:Name="DialogTitleText" Text="Windows ISO Options" FontSize="27" FontWeight="Light"/><TextBlock x:Name="IsoNameText" Foreground="{DynamicResource ThemeMuted}" TextTrimming="CharacterEllipsis"/></StackPanel>
                 <Button Grid.Column="1" Content="×" Click="Cancel_Click" Foreground="{DynamicResource ThemeText}" Background="Transparent" FontSize="20" Padding="4" VerticalAlignment="Top"/>
             </Grid>
             <StackPanel Grid.Row="1" Margin="0,22,0,0">
@@ -30,7 +30,7 @@
             <TextBlock Grid.Row="2" Text="Choose the Windows edition here. Drivers can be added separately from the partition's Add menu. Prepared media is cached and reused across the USB queue." Foreground="{DynamicResource ThemeMuted}" TextWrapping="Wrap" VerticalAlignment="Bottom" Margin="2,14,0,0"/>
             <Grid Grid.Row="3" Margin="0,20,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="110"/><ColumnDefinition Width="120"/></Grid.ColumnDefinitions>
                 <Button Grid.Column="1" Content="Cancel" Click="Cancel_Click" Margin="0,0,8,0"/>
-                <Button Grid.Column="2" Content="Use ISO" Click="Accept_Click" Background="{DynamicResource AddButtonBackground}" Foreground="{DynamicResource AddButtonForeground}"/>
+                <Button x:Name="AcceptButton" Grid.Column="2" Content="Use ISO" Click="Accept_Click" Background="{DynamicResource AddButtonBackground}" Foreground="{DynamicResource AddButtonForeground}"/>
             </Grid>
         </Grid>
     </Border>

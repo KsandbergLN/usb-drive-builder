@@ -699,6 +699,19 @@ public sealed class WindowsMediaPreparer
 
     private async Task CopyIsoToStagingAsync(string isoPath, string mediaRoot)
     {
+        if (Directory.Exists(isoPath))
+        {
+            _activity("Copying the Windows installer folder to local staging...");
+            if (!WindowsMediaFolderSource.IsInstaller(isoPath))
+                throw new InvalidOperationException("The selected Windows installer folder is incomplete or unavailable.");
+            foreach (var file in WindowsMediaFolderSource.EnumerateFiles(isoPath, _cancellationToken))
+            {
+                var destination = Path.Combine(mediaRoot, Path.GetRelativePath(isoPath, file));
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                await CopyFileCancellableAsync(file, destination);
+            }
+            return;
+        }
         var driveLetter = await _mountIso(isoPath);
         try
         {
@@ -1279,8 +1292,8 @@ public sealed class WindowsMediaPreparer
 
     private async Task<string> CreateCacheKeyAsync(string isoPath, WindowsIsoSelection selection)
     {
-        _activity("Hashing the ISO for media cache reuse...");
-        var isoHash = await HashFileAsync(isoPath);
+        _activity("Hashing Windows media for cache reuse...");
+        var isoHash = Directory.Exists(isoPath) ? await HashMediaFolderAsync(isoPath) : await HashFileAsync(isoPath);
         _cancellationToken.ThrowIfCancellationRequested();
         var driverManifest = selection.AddDrivers
             ? CreateDriverManifest(selection.DriverFolders, selection.DriverFiles)
@@ -1296,6 +1309,19 @@ public sealed class WindowsMediaPreparer
             FileOptions.Asynchronous | FileOptions.SequentialScan);
         using var hash = SHA256.Create();
         return Convert.ToHexString(await hash.ComputeHashAsync(stream, _cancellationToken));
+    }
+
+    private async Task<string> HashMediaFolderAsync(string root)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hash.AppendData(Encoding.UTF8.GetBytes("WINDOWS_FOLDER_V1\n"));
+        foreach (var file in WindowsMediaFolderSource.EnumerateFiles(root, _cancellationToken)
+            .OrderBy(path => Path.GetRelativePath(root, path), StringComparer.OrdinalIgnoreCase))
+        {
+            var relative = Path.GetRelativePath(root, file).ToUpperInvariant();
+            hash.AppendData(Encoding.UTF8.GetBytes(relative + "\0" + await HashFileAsync(file) + "\n"));
+        }
+        return Convert.ToHexString(hash.GetHashAndReset());
     }
 
     private string CreateDriverManifest(string root)

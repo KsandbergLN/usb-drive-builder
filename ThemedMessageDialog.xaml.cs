@@ -31,11 +31,14 @@ public partial class ThemedMessageDialog : Window
 
     public static MessageBoxResult Show(Window? owner, string message, string title,
         MessageBoxButton buttons = MessageBoxButton.OK, MessageBoxImage image = MessageBoxImage.None,
-        MessageBoxResult defaultResult = MessageBoxResult.None)
+        MessageBoxResult defaultResult = MessageBoxResult.None,
+        string? yesButtonText = null, string? noButtonText = null)
     {
         owner ??= Application.Current?.Windows.OfType<Window>().FirstOrDefault(window => window.IsActive)
                   ?? Application.Current?.MainWindow;
         var dialog = new ThemedMessageDialog(message, title, buttons, image, defaultResult, ResolveTheme(owner));
+        if (yesButtonText is not null && dialog.FindButton(MessageBoxResult.Yes) is { } yesButton) yesButton.Content = yesButtonText;
+        if (noButtonText is not null && dialog.FindButton(MessageBoxResult.No) is { } noButton) noButton.Content = noButtonText;
         if (owner is not null && owner.IsLoaded)
         {
             dialog.Owner = owner;
