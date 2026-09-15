@@ -9,7 +9,7 @@ This is an operations handoff for technicians. It does not describe how the appl
 ## Current release
 
 - Application: USB Drive Builder
-- Release: 2.0.105
+- Release: 2.0.106
 
 The main window is work-area aware and supports standard maximize/restore behavior. A 1360×800 logical design surface is uniformly scaled to the available window, keeping all cards, typography, controls, spacing, progress indicators, and the Partition Layout preview proportional and visible instead of allowing Auto-sized rows to collapse the preview. Both borderless windows use a 14-DIP interactive resize zone on every side and corner: the cursor changes to the matching resize cursor and a press directly starts the Windows resize loop, with native hit testing retained as a fallback. Drag resizing is aspect-locked to each logical design surface (17:10 for the main window and 47:38 for Configuration); maximize still fills the work area normally. Configuration starts within the work area and uniformly scales its complete 940×760 logical surface.
 - Platform: Windows 10/11, 64-bit
