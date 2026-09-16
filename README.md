@@ -4,6 +4,8 @@
 
 Current release: **v2.0.110**. [Download the latest Windows x64 executable](https://github.com/KsandbergLN/usb-drive-builder/releases/latest) · [Release notes](docs/RELEASE_NOTES.md) · [Quick User Guide](docs/QUICK_USER_GUIDE.md) · [Technician Handoff](docs/TECHNICIAN_HANDOFF.md).
 
+Feature developers: see [Canonical Source](CANONICAL-SOURCE.md), [Developer Handoff](DEVELOPER-HANDOFF.md), [macOS workflow](macos/README.md), and the [Future Wishlist](docs/FUTURE_WISHLIST.md).
+
 The main window starts within the usable desktop area. Its complete 1360×800 logical design surface scales uniformly with the window—including cards, text, controls, spacing, partition preview, and progress indicators—so the same layout remains visible on smaller laptop displays and expands proportionally when maximized. Drag any side or corner of the borderless window to resize it; the 17:10 design ratio remains locked during dragging. Configuration uses the same behavior, preserves its 47:42 ratio, and scales its complete 940×840 design surface inside a smaller, work-area-aware starting window. Maximizing either window still fills the normal Windows work area.
 
 **USB Drive Builder** is a Windows desktop tool for IT technicians who need to turn one or more USB drives into consistent, ready-to-use laptop support media. It replaces repetitive manual disk preparation with a guided workflow that erases approved USB disks, creates a configurable MBR partition layout, formats each volume, and copies the correct diagnostic, Windows setup, and support content to its destination.
